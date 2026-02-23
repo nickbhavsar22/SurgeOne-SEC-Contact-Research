@@ -1,0 +1,12 @@
+.env
+.tmp/
+__pycache__/
+*.pyc
+credentials.json
+token.json
+*.db
+.DS_Store
+Thumbs.db
+*.mp4
+*.vtt
+.pytest_cache/
