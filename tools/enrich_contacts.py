@@ -25,6 +25,15 @@ from tools.cache_db import (
 
 load_dotenv()
 
+# Bridge Streamlit Cloud secrets into env vars for os.getenv() compatibility
+try:
+    import streamlit as st
+    for key in st.secrets:
+        if isinstance(st.secrets[key], str):
+            os.environ.setdefault(key, st.secrets[key])
+except Exception:
+    pass
+
 HUNTER_API_KEY = os.getenv('HUNTER_API_KEY', '')
 HUNTER_DOMAIN_SEARCH = 'https://api.hunter.io/v2/domain-search'
 HUNTER_EMAIL_FINDER = 'https://api.hunter.io/v2/email-finder'
