@@ -536,16 +536,21 @@ def _stage_1_content():
 
 def _stage_2_content():
     """IAPD Form ADV Lookup."""
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        adv_track = st.selectbox("Track to query", ["A", "B", "Both"], key="adv_track")
-    with col2:
-        st.write("")
-        st.write("")
-        run_adv = st.button("Run IAPD Lookup", key="btn_adv", type="primary")
+    all_firms = _get_crd_list(
+        st.selectbox("Track to query", ["A", "B", "Both"], key="adv_track")
+    )
+    total = len(all_firms)
+    if total > 0:
+        adv_limit = st.slider(
+            "Firms to query", min_value=1, max_value=total, value=total,
+            key="adv_limit", help="Limit the number of firms to query. Defaults to all.",
+        )
+    else:
+        adv_limit = 0
+    run_adv = st.button("Run IAPD Lookup", key="btn_adv", type="primary")
 
     if run_adv:
-        firms = _get_crd_list(adv_track)
+        firms = all_firms[:adv_limit]
         if not firms:
             st.warning("No firms found for this track.")
         else:
@@ -574,15 +579,18 @@ def _stage_2_content():
         "individual filing documents (XML/HTML)"
     )
 
-    col_a, col_b = st.columns([3, 1])
-    with col_a:
-        cco_track = st.selectbox(
-            "Track to extract CCOs", ["A", "B", "Both"], key="cco_track",
+    all_pairs = _get_crd_company_list(
+        st.selectbox("Track to extract CCOs", ["A", "B", "Both"], key="cco_track")
+    )
+    total_cco = len(all_pairs)
+    if total_cco > 0:
+        cco_limit = st.slider(
+            "Firms to extract", min_value=1, max_value=total_cco, value=total_cco,
+            key="cco_limit", help="Limit the number of firms for CCO extraction. Defaults to all.",
         )
-    with col_b:
-        st.write("")
-        st.write("")
-        run_cco = st.button("Extract CCO Names", key="btn_cco", type="primary")
+    else:
+        cco_limit = 0
+    run_cco = st.button("Extract CCO Names", key="btn_cco", type="primary")
 
     # Show results from previous run
     if 'last_cco_result' in st.session_state:
@@ -595,7 +603,7 @@ def _stage_2_content():
         )
 
     if run_cco:
-        crd_company_pairs = _get_crd_company_list(cco_track)
+        crd_company_pairs = all_pairs[:cco_limit]
         if not crd_company_pairs:
             st.warning("No firms found for this track.")
         else:
