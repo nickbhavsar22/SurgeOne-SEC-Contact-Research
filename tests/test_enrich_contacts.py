@@ -159,9 +159,44 @@ class TestDomainSearch:
                                  db_path=tmp_db)
         assert contacts == []
 
+    @patch('tools.enrich_contacts.HUNTER_API_KEY', 'test_key')
+    @patch('tools.enrich_contacts.requests.get')
+    def test_company_name_only(self, mock_get, tmp_db, sample_firm):
+        upsert_firms([sample_firm], db_path=tmp_db)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            'data': {
+                'domain': 'testwm.com',
+                'emails': [
+                    {
+                        'value': 'jane@testwm.com',
+                        'first_name': 'Jane',
+                        'last_name': 'Doe',
+                        'position': 'CEO',
+                        'confidence': 85,
+                    },
+                ]
+            }
+        }
+        mock_get.return_value = mock_resp
+
+        contacts = domain_search(company='Test Wealth Management LLC',
+                                 crd=sample_firm['crd'], db_path=tmp_db)
+        assert len(contacts) == 1
+        assert contacts[0]['contact_name'] == 'Jane Doe'
+        # Verify company param was passed to the API
+        call_args = mock_get.call_args
+        assert call_args[1]['params']['company'] == 'Test Wealth Management LLC'
+        assert 'domain' not in call_args[1]['params']
+
     @patch('tools.enrich_contacts.HUNTER_API_KEY', '')
     def test_returns_empty_without_api_key(self, tmp_db):
         contacts = domain_search('testwm.com', db_path=tmp_db)
+        assert contacts == []
+
+    def test_returns_empty_without_domain_or_company(self, tmp_db):
+        contacts = domain_search(db_path=tmp_db)
         assert contacts == []
 
     @patch('tools.enrich_contacts.HUNTER_API_KEY', 'test_key')
@@ -317,30 +352,40 @@ class TestResearchFirmsBatch:
 
     @patch('tools.enrich_contacts.HUNTER_API_KEY', 'test_key')
     @patch('tools.enrich_contacts.domain_search')
-    def test_skips_firms_without_website(self, mock_search, tmp_db):
+    def test_searches_firms_without_website_by_company_name(
+            self, mock_search, tmp_db):
         firm_no_website = {
             'crd': 999003, 'company': 'No Website LLC',
             'status': '120-Day Approval', 'track': 'A',
         }
         upsert_firms([firm_no_website], db_path=tmp_db)
+        mock_search.return_value = []
 
         result = research_firms_batch([999003], db_path=tmp_db)
-        assert result['skipped'] == 1
-        mock_search.assert_not_called()
+        # Should search by company name, not skip
+        mock_search.assert_called_once()
+        call_kwargs = mock_search.call_args[1]
+        assert call_kwargs.get('company') == 'No Website LLC'
+        assert call_kwargs.get('domain') is None
 
     @patch('tools.enrich_contacts.HUNTER_API_KEY', 'test_key')
     @patch('tools.enrich_contacts.domain_search')
-    def test_skips_linkedin_domains(self, mock_search, tmp_db):
+    def test_searches_linkedin_firms_by_company_name(
+            self, mock_search, tmp_db):
         firm_linkedin = {
             'crd': 999004, 'company': 'LinkedIn Firm',
             'website': 'https://www.linkedin.com/company/test',
             'status': '120-Day Approval', 'track': 'A',
         }
         upsert_firms([firm_linkedin], db_path=tmp_db)
+        mock_search.return_value = []
 
         result = research_firms_batch([999004], db_path=tmp_db)
-        assert result['skipped'] == 1
-        mock_search.assert_not_called()
+        # Should search by company name (domain is None for LinkedIn)
+        mock_search.assert_called_once()
+        call_kwargs = mock_search.call_args[1]
+        assert call_kwargs.get('company') == 'LinkedIn Firm'
+        assert call_kwargs.get('domain') is None
 
     @patch('tools.enrich_contacts.HUNTER_API_KEY', 'test_key')
     @patch('tools.enrich_contacts.domain_search')

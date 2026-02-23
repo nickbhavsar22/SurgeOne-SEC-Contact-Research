@@ -23,17 +23,11 @@ from tools.cache_db import (
     get_monthly_hunter_credits, get_unprocessed_crds,
 )
 from tools.fetch_sec_data import fetch_and_store, probe_sec_urls
-try:
-    from tools.enrich_contacts import (
-        research_firms_batch, HUNTER_API_KEY, DEFAULT_BATCH_CREDIT_LIMIT,
-    )
-except ImportError as e:
-    import traceback
-    st.error(f"Failed to import enrich_contacts: {e}")
-    st.code(traceback.format_exc())
-    st.stop()
+from tools.enrich_contacts import (
+    research_firms_batch, HUNTER_API_KEY, DEFAULT_BATCH_CREDIT_LIMIT,
+)
 
-APP_VERSION = "0.5.2"
+APP_VERSION = "0.5.3"
 LOGO_PATH = Path(__file__).parent / "assets" / "logo.png"
 
 # --- Page Config ---
@@ -442,11 +436,12 @@ def _section_research(stats):
     # Show results from previous run
     if 'last_research_result' in st.session_state:
         result = st.session_state.pop('last_research_result')
-        col_a, col_b, col_c, col_d = st.columns(4)
-        col_a.metric("Firms Processed", result.get('processed', 0))
-        col_b.metric("Contacts Found", result.get('contacts_found', 0))
-        col_c.metric("Skipped (no domain)", result.get('skipped', 0))
-        col_d.metric("Credits Used", result.get('credits_used', 0))
+        col_a, col_b, col_c, col_d, col_e = st.columns(5)
+        col_a.metric("Contacts Found", result.get('contacts_found', 0))
+        col_b.metric("With Results", result.get('processed', 0))
+        col_c.metric("No Results", result.get('no_contacts', 0))
+        col_d.metric("Skipped", result.get('skipped', 0))
+        col_e.metric("Credits Used", result.get('credits_used', 0))
 
     if run_btn:
         firms_to_process = unprocessed[:batch_size]
@@ -463,9 +458,9 @@ def _section_research(stats):
             )
             elapsed = time.time() - start_time
             status_text.text(
-                f"Contacts found: {res['contacts_found']} | "
-                f"Firms with results: {res['processed']} | "
-                f"Skipped: {res['skipped']} | "
+                f"Contacts: {res['contacts_found']} | "
+                f"With results: {res['processed']} | "
+                f"No results: {res['no_contacts']} | "
                 f"Credits: {res['credits_used']} | "
                 f"Elapsed: {elapsed:.0f}s"
             )
@@ -486,8 +481,6 @@ def _section_research(stats):
         )
         if result.get('credit_limit_hit'):
             st.warning("Credit limit reached. Run again to continue.")
-        if result.get('skipped'):
-            st.info(f"{result['skipped']} firms skipped (no usable website domain).")
 
         # Store results for display after rerun
         st.session_state['last_research_result'] = result

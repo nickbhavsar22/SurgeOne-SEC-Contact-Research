@@ -101,28 +101,36 @@ def _extract_domain(url):
         return None
 
 
-def domain_search(domain, crd=None, db_path=None):
-    """Search Hunter.io for all people at a domain.
+def domain_search(domain=None, company=None, crd=None, db_path=None):
+    """Search Hunter.io for all people at a domain or company.
 
     Args:
         domain: website domain to search (e.g., 'acmecapital.com')
+        company: company name for fallback lookup (e.g., 'Acme Capital LLC')
         crd: firm CRD number (for logging)
         db_path: database path
 
     Returns list of contacts: [{first_name, last_name, position, email,
                                 phone, confidence, source}]
-    Uses 1 Hunter.io credit.
+    Uses 1 Hunter.io credit. At least one of domain or company is required.
     """
-    if not HUNTER_API_KEY or not domain:
+    if not HUNTER_API_KEY or (not domain and not company):
         return []
 
+    search_label = domain or company
+
     try:
-        resp = requests.get(HUNTER_DOMAIN_SEARCH, params={
-            'domain': domain,
+        params = {
             'api_key': HUNTER_API_KEY,
             'limit': 20,
             'type': 'personal',
-        }, timeout=15)
+        }
+        if domain:
+            params['domain'] = domain
+        if company:
+            params['company'] = company
+
+        resp = requests.get(HUNTER_DOMAIN_SEARCH, params=params, timeout=15)
 
         log_enrichment(
             crd or 0, 'hunter_io', '/domain-search', resp.status_code,
@@ -161,7 +169,7 @@ def domain_search(domain, crd=None, db_path=None):
         return contacts
 
     except requests.RequestException as e:
-        logger.error('Domain search failed for %s: %s', domain, e)
+        logger.error('Domain search failed for %s: %s', search_label, e)
         log_enrichment(
             crd or 0, 'hunter_io', '/domain-search', 0, 'error',
             db_path=db_path,
@@ -219,8 +227,8 @@ def research_firms_batch(crd_list, max_age_days=30, credit_limit=None,
                          db_path=None, progress_callback=None):
     """Research all firms in crd_list using Hunter.io Domain Search.
 
-    For each unprocessed firm with a usable website domain:
-      1. Call Hunter.io Domain Search (1 credit)
+    For each unprocessed firm:
+      1. Call Hunter.io Domain Search with domain and/or company name (1 credit)
       2. Store all returned contacts in the database
       3. Mark firm as processed (cached for max_age_days)
 
@@ -277,21 +285,18 @@ def research_firms_batch(crd_list, max_age_days=30, credit_limit=None,
             continue
 
         firm = get_firm_by_crd(crd, db_path=db_path)
-        if not firm or not firm.get('website'):
+        if not firm:
             results['skipped'] += 1
             results['credits_used'] = credits_used
-            # Still mark as processed so we don't retry firms without websites
-            upsert_form_adv(crd, {
-                'cco_name': None, 'cco_email': None, 'cco_phone': None,
-                'state_registrations': None, 'state_count': 0,
-                'aum_breakdown': None,
-            }, db_path=db_path)
             if progress_callback:
                 progress_callback(i + 1, total, results)
             continue
 
-        domain = _extract_domain(firm['website'])
-        if not domain:
+        domain = _extract_domain(firm.get('website'))
+        company_name = firm.get('company') or firm.get('legal_name')
+
+        # Need at least a domain or company name to search
+        if not domain and not company_name:
             results['skipped'] += 1
             results['credits_used'] = credits_used
             upsert_form_adv(crd, {
@@ -304,7 +309,10 @@ def research_firms_batch(crd_list, max_age_days=30, credit_limit=None,
             continue
 
         try:
-            contacts = domain_search(domain, crd=crd, db_path=db_path)
+            contacts = domain_search(
+                domain=domain, company=company_name,
+                crd=crd, db_path=db_path,
+            )
             credits_used += 1
 
             # Clear old contacts and insert new ones
