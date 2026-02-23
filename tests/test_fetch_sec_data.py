@@ -12,7 +12,6 @@ from tools.fetch_sec_data import (
     parse_sec_dataframe, classify_track, fetch_and_store,
     _safe_int, _safe_str, _build_candidate_urls, download_sec_csv,
     build_candidate_urls, probe_sec_urls,
-    NEAR_THRESHOLD_AUM,
 )
 
 FIXTURES = Path(__file__).parent / 'fixtures'
@@ -103,27 +102,23 @@ class TestParseSecDataframe:
 
 class TestClassifyTrack:
     def test_track_a_120day(self):
-        record = {'status': '120-Day Approval', 'sec_registered': 'Y', 'aum': 95000000}
+        record = {'status': '120-Day Approval'}
         assert classify_track(record) == 'A'
 
     def test_track_a_pending(self):
-        record = {'status': 'Pending', 'sec_registered': 'Y', 'aum': 50000000}
+        record = {'status': 'Pending'}
         assert classify_track(record) == 'A'
 
-    def test_track_b_near_threshold(self):
-        record = {'status': 'Approved', 'sec_registered': 'N', 'aum': 92000000}
-        assert classify_track(record) == 'B'
-
-    def test_track_b_exactly_threshold(self):
-        record = {'status': 'Approved', 'sec_registered': 'N', 'aum': NEAR_THRESHOLD_AUM}
-        assert classify_track(record) == 'B'
-
-    def test_no_track_small_firm(self):
-        record = {'status': 'Approved', 'sec_registered': 'N', 'aum': 2500000}
+    def test_no_track_approved(self):
+        record = {'status': 'Approved'}
         assert classify_track(record) is None
 
-    def test_no_track_sec_registered(self):
-        record = {'status': 'Approved', 'sec_registered': 'Y', 'aum': 150000000}
+    def test_no_track_empty_status(self):
+        record = {'status': ''}
+        assert classify_track(record) is None
+
+    def test_no_track_none_status(self):
+        record = {'status': None}
         assert classify_track(record) is None
 
 
@@ -133,9 +128,8 @@ class TestFetchAndStore:
         mock_download.return_value = sample_df
         result = fetch_and_store(db_path=tmp_db)
         assert result['downloaded'] == 5
-        assert result['track_a'] >= 1  # At least the 120-day firm
-        assert result['track_b'] >= 1  # At least the near-threshold firm
-        assert result['skipped'] >= 1  # The tiny firm
+        assert result['firms_imported'] >= 1  # At least the 120-day firm
+        assert result['skipped'] >= 1  # Non-120-day firms
 
     @patch('tools.fetch_sec_data.download_sec_csv')
     def test_handles_download_failure(self, mock_download, tmp_db):

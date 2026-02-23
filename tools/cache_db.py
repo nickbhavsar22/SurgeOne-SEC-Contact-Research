@@ -167,27 +167,13 @@ def upsert_firms(records, db_path=None):
     return count
 
 
-def get_firms(track=None, min_score=None, has_contact=None, db_path=None):
-    """Query firms with optional filters. Returns list of dicts."""
+def get_firms(db_path=None):
+    """Query all imported firms. Returns list of dicts."""
     conn = get_connection(db_path)
     try:
-        query = "SELECT f.*, c.contact_name, c.first_name, c.last_name, c.contact_email, c.contact_title, c.contact_phone FROM firms f LEFT JOIN contacts c ON f.crd = c.crd"
-        conditions = []
-        params = []
-        if track:
-            conditions.append("f.track = ?")
-            params.append(track)
-        if min_score is not None:
-            conditions.append("f.fit_score >= ?")
-            params.append(min_score)
-        if has_contact is True:
-            conditions.append("c.contact_email IS NOT NULL")
-        elif has_contact is False:
-            conditions.append("c.contact_email IS NULL")
-        if conditions:
-            query += " WHERE " + " AND ".join(conditions)
-        query += " ORDER BY f.fit_score DESC NULLS LAST, f.aum DESC"
-        rows = conn.execute(query, params).fetchall()
+        rows = conn.execute(
+            "SELECT * FROM firms ORDER BY company"
+        ).fetchall()
         return [dict(row) for row in rows]
     finally:
         conn.close()
@@ -347,7 +333,7 @@ def upsert_contact(crd, contact, db_path=None):
 
 
 def get_contact(crd, db_path=None):
-    """Get the best contact for a firm."""
+    """Get the best contact for a firm (legacy, returns single contact)."""
     conn = get_connection(db_path)
     try:
         row = conn.execute(
@@ -359,43 +345,130 @@ def get_contact(crd, db_path=None):
         conn.close()
 
 
-def get_unenriched_crds(crd_list=None, db_path=None):
-    """Return CRDs that have no contact data yet."""
+def insert_contact(crd, contact, db_path=None):
+    """Insert a contact for a firm. Allows multiple contacts per firm."""
     conn = get_connection(db_path)
+    now = datetime.utcnow().isoformat()
     try:
-        if crd_list:
-            stale = []
-            for i in range(0, len(crd_list), 500):
-                chunk = crd_list[i:i + 500]
-                placeholders = ",".join("?" * len(chunk))
-                rows = conn.execute(f"""
-                    SELECT DISTINCT crd FROM contacts
-                    WHERE crd IN ({placeholders}) AND contact_email IS NOT NULL
-                """, chunk).fetchall()
-                enriched = {row['crd'] for row in rows}
-                stale.extend(c for c in chunk if c not in enriched)
-            return stale
-        else:
-            rows = conn.execute("""
-                SELECT f.crd FROM firms f
-                LEFT JOIN contacts c ON f.crd = c.crd
-                WHERE c.contact_email IS NULL
-            """).fetchall()
-            return [row['crd'] for row in rows]
+        parsed_first, parsed_last = _parse_name(contact.get('contact_name'))
+        first_name = contact.get('first_name') or parsed_first
+        last_name = contact.get('last_name') or parsed_last
+        conn.execute("""
+            INSERT INTO contacts (crd, contact_name, first_name, last_name,
+                contact_email, contact_title, contact_phone, contact_linkedin,
+                source, confidence, enriched_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            crd, contact.get('contact_name'), first_name, last_name,
+            contact.get('contact_email'), contact.get('contact_title'),
+            contact.get('contact_phone'), contact.get('contact_linkedin'),
+            contact.get('source'), contact.get('confidence', 0), now,
+        ))
+        conn.commit()
+        return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     finally:
         conn.close()
 
 
-def update_contact_validation(contact_id, status, issues, db_path=None):
-    """Update validation status for a contact."""
+def get_contacts_for_firm(crd, db_path=None):
+    """Get ALL contacts for a firm."""
+    conn = get_connection(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM contacts WHERE crd = ? ORDER BY contact_title, contact_name",
+            (crd,)
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def get_all_contacts_with_firms(db_path=None):
+    """Join all contacts with firm data for display/export."""
+    conn = get_connection(db_path)
+    try:
+        rows = conn.execute("""
+            SELECT c.id, c.crd, f.company, f.state, f.website, f.aum,
+                   c.contact_name, c.first_name, c.last_name,
+                   c.contact_email, c.contact_title, c.contact_phone,
+                   c.source, c.confidence, c.enriched_at
+            FROM contacts c
+            JOIN firms f ON c.crd = f.crd
+            ORDER BY f.company, c.contact_title
+        """).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def delete_contacts_for_firm(crd, db_path=None):
+    """Delete all contacts for a firm (used before re-processing)."""
+    conn = get_connection(db_path)
+    try:
+        conn.execute("DELETE FROM contacts WHERE crd = ?", (crd,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_unprocessed_crds(crd_list, max_age_days=30, db_path=None):
+    """Return CRDs that haven't been PDF-processed recently."""
+    if not crd_list:
+        return []
+    conn = get_connection(db_path)
+    cutoff = (datetime.utcnow() - timedelta(days=max_age_days)).isoformat()
+    try:
+        fresh = set()
+        for i in range(0, len(crd_list), 500):
+            chunk = crd_list[i:i + 500]
+            placeholders = ",".join("?" * len(chunk))
+            rows = conn.execute(f"""
+                SELECT crd FROM form_adv_details
+                WHERE crd IN ({placeholders}) AND scraped_at > ?
+            """, chunk + [cutoff]).fetchall()
+            fresh.update(row['crd'] for row in rows)
+        return [c for c in crd_list if c not in fresh]
+    finally:
+        conn.close()
+
+
+def update_contact_email(contact_id, email, phone=None, db_path=None):
+    """Update a contact's email and optionally phone after Hunter.io enrichment."""
     conn = get_connection(db_path)
     now = datetime.utcnow().isoformat()
     try:
-        conn.execute(
-            "UPDATE contacts SET validation_status=?, validation_issues=?, validated_at=? WHERE id=?",
-            (status, issues, now, contact_id)
-        )
+        if phone:
+            conn.execute(
+                "UPDATE contacts SET contact_email=?, contact_phone=?, enriched_at=? WHERE id=?",
+                (email, phone, now, contact_id)
+            )
+        else:
+            conn.execute(
+                "UPDATE contacts SET contact_email=?, enriched_at=? WHERE id=?",
+                (email, now, contact_id)
+            )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def get_contact_stats(db_path=None):
+    """Get summary contact statistics."""
+    conn = get_connection(db_path)
+    try:
+        total = conn.execute("SELECT COUNT(*) as n FROM contacts").fetchone()['n']
+        with_email = conn.execute(
+            "SELECT COUNT(*) as n FROM contacts WHERE contact_email IS NOT NULL"
+        ).fetchone()['n']
+        firms_processed = conn.execute(
+            "SELECT COUNT(*) as n FROM form_adv_details"
+        ).fetchone()['n']
+        return {
+            'total_contacts': total,
+            'with_email': with_email,
+            'without_email': total - with_email,
+            'firms_processed': firms_processed,
+        }
     finally:
         conn.close()
 
@@ -495,70 +568,24 @@ def get_export_history(db_path=None):
 # --- Pipeline Stats ---
 
 def get_pipeline_stats(db_path=None):
-    """Get funnel metrics for the pipeline overview."""
+    """Get summary stats for the simplified pipeline."""
     conn = get_connection(db_path)
     try:
         total = conn.execute("SELECT COUNT(*) as n FROM firms").fetchone()['n']
-        by_track = conn.execute(
-            "SELECT track, COUNT(*) as n FROM firms GROUP BY track"
-        ).fetchall()
-        scored = conn.execute(
-            "SELECT COUNT(*) as n FROM firms WHERE fit_score IS NOT NULL"
+        processed = conn.execute(
+            "SELECT COUNT(*) as n FROM form_adv_details"
         ).fetchone()['n']
-        enriched = conn.execute("""
-            SELECT COUNT(DISTINCT f.crd) as n FROM firms f
-            JOIN contacts c ON f.crd = c.crd WHERE c.contact_email IS NOT NULL
-        """).fetchone()['n']
-        validated = conn.execute("""
-            SELECT COUNT(DISTINCT f.crd) as n FROM firms f
-            JOIN contacts c ON f.crd = c.crd WHERE c.validation_status = 'valid'
-        """).fetchone()['n']
+        total_contacts = conn.execute(
+            "SELECT COUNT(*) as n FROM contacts"
+        ).fetchone()['n']
+        with_email = conn.execute(
+            "SELECT COUNT(*) as n FROM contacts WHERE contact_email IS NOT NULL"
+        ).fetchone()['n']
         return {
             'total_firms': total,
-            'by_track': {row['track']: row['n'] for row in by_track},
-            'scored': scored,
-            'enriched': enriched,
-            'validated': validated,
-        }
-    finally:
-        conn.close()
-
-
-def get_pipeline_stage_stats(db_path=None):
-    """Get detailed stage completion stats for progressive pipeline UI."""
-    conn = get_connection(db_path)
-    try:
-        total = conn.execute("SELECT COUNT(*) as n FROM firms").fetchone()['n']
-        by_track = conn.execute(
-            "SELECT track, COUNT(*) as n FROM firms GROUP BY track"
-        ).fetchall()
-        iapd_queried = conn.execute("""
-            SELECT COUNT(*) as n FROM form_adv_details fad
-            JOIN firms f ON fad.crd = f.crd
-        """).fetchone()['n']
-        scored = conn.execute(
-            "SELECT COUNT(*) as n FROM firms WHERE fit_score IS NOT NULL"
-        ).fetchone()['n']
-        enriched = conn.execute("""
-            SELECT COUNT(DISTINCT f.crd) as n FROM firms f
-            JOIN contacts c ON f.crd = c.crd WHERE c.contact_email IS NOT NULL
-        """).fetchone()['n']
-        validated = conn.execute("""
-            SELECT COUNT(DISTINCT f.crd) as n FROM firms f
-            JOIN contacts c ON f.crd = c.crd WHERE c.validation_status IS NOT NULL
-        """).fetchone()['n']
-        valid_count = conn.execute("""
-            SELECT COUNT(DISTINCT f.crd) as n FROM firms f
-            JOIN contacts c ON f.crd = c.crd WHERE c.validation_status = 'valid'
-        """).fetchone()['n']
-        return {
-            'total_firms': total,
-            'by_track': {row['track']: row['n'] for row in by_track},
-            'iapd_queried': iapd_queried,
-            'scored': scored,
-            'enriched': enriched,
-            'validated': validated,
-            'valid': valid_count,
+            'firms_processed': processed,
+            'total_contacts': total_contacts,
+            'contacts_with_email': with_email,
         }
     finally:
         conn.close()

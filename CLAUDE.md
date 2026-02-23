@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **SurgeOne — SEC & Contact Research** automates the discovery of newly SEC-registered RIAs (Registered Investment Advisors) and their key contacts for compliance advisory outreach by SurgeOne.ai.
 
-The core workflow: identify firms transitioning from state registration to SEC registration (120-day approval window), extract Chief Compliance Officers and other decision-makers from Form ADV filings, enrich with email/phone via third-party tools, and feed into outreach cadences.
+The core workflow: identify firms in the 120-day SEC registration approval window, extract all contacts (names + titles) from their Form ADV PDFs, enrich with email/phone via Hunter.io, and export for outreach.
 
 ## Domain Knowledge
 
@@ -17,24 +17,19 @@ The core workflow: identify firms transitioning from state registration to SEC r
 - This transition window is the prime outreach moment — firms need compliance infrastructure before SEC approval completes
 
 ### Key Data Sources
+
 | Source | What It Provides | Access |
 |--------|-----------------|--------|
 | **SEC FOIA Data** | Monthly CSV dumps of all registered investment advisers (~448 columns) | `https://www.sec.gov/foia` — public, no auth |
-| **IAPD** (Investment Adviser Public Disclosure) | Firm lookup → Form ADV viewer → CCO info, AUM, state registrations | `https://adviserinfo.sec.gov/` — public, no auth |
-| **Form ADV** | Section I: CCO name/email; Section D: AUM breakdown by account type | Via IAPD firm detail pages |
-| **SEC EDGAR Full-Text Search** | Company filings search | `https://efts.sec.gov/LATEST/search-index` — public API |
+| **Form ADV PDFs** | Contact names, titles (Principal/Owner, CCO, officers) | `reports.adviserinfo.sec.gov/reports/ADV/{CRD}/PDF/{CRD}.pdf` — public |
+| **Hunter.io** | Email + phone lookup by person name + company domain | API key required, 2,000 credits/month |
 
-### Target Contact: Chief Compliance Officer (CCO)
-- Required by SEC — every registered firm must name a CCO on Form ADV
-- Often the **managing principal wearing the CCO hat** ("CCO in name only") at smaller firms
-- This is the ideal outreach target: they need compliance help but it's not their primary role
-- Form ADV Section I lists the CCO name; email is often missing (9 out of 10 times per field observation)
+### Target Contacts
 
-### ICP Signals (SurgeOne.ai Fit)
-- **Strong fit:** Multi-state → SEC transition, 50M-150M AUM, growing client count, no dedicated CCO
-- **AUM thresholds:** State < $100M < SEC; firms near the boundary are transitioning
-- **State registration count:** 4+ state registrations = catalyst for SEC move
-- **Growth trajectory:** Compare current AUM against prior filings
+- **Chief Compliance Officer (CCO)** — required by SEC, often the managing principal at smaller firms
+- **Principal/Owner** — listed in Form ADV Part 1A
+- **Other officers/directors** — from Schedule A/B of Form ADV
+- Form ADV PDFs contain names and titles but NOT email/phone — Hunter.io fills that gap
 
 ## Sibling Project Reference
 
@@ -48,41 +43,32 @@ This project may reuse patterns from that codebase (especially SEC data parsing 
 
 ## Architecture
 
-**UI:** Streamlit dashboard (consistent with other BGC projects)
+**UI:** Streamlit single-page dashboard (dark theme)
 **Framework:** WAT (inherited from `../CLAUDE.md`)
 
-### Two-Track Pipeline
+### Two-Stage Pipeline
 
-**Track A: 120-Day Approval Firms** (firms already filing for SEC registration)
 ```
-SEC FOIA CSV → filter status="120-day approval"
-    → IAPD lookup → Form ADV CCO extraction
-    → Hunter.io / website scraping for email
-    → Streamlit dashboard + CSV export
-```
+Stage 1: Import SEC Data
+  Upload SEC FOIA ZIP/CSV → parse → filter to 120-day approvals → store in DB
 
-**Track B: Near-Threshold State Firms** (firms approaching SEC transition)
-```
-SEC FOIA CSV → filter state-registered + AUM $90M-$100M+
-    → Check state registration count (4+ = catalyst)
-    → IAPD lookup → Form ADV details
-    → Contact discovery (same fallback chain)
-    → Streamlit dashboard + CSV export
-```
+Stage 2: Research Firms (user sets batch size)
+  For each firm:
+    1. Download Form ADV PDF → extract ALL contacts (names + titles) via pdfplumber
+    2. For each contact without email → Hunter.io Email Finder (1 credit each)
+    3. Mark firm as processed (cached for 30 days)
 
-### Contact Discovery Waterfall
-1. **Form ADV Section I** — CCO name + email (email missing ~90% of the time)
-2. **Hunter.io Domain Search** — email from firm's website domain (free tier: 50/month)
-3. **Website Scraping** — scrape firm homepage + subpages (/contact, /about, /team, /leadership) for emails, phones, bios
-4. *(Future: Lemlist People Database — when API access confirmed)*
+Export: CSV with all contacts joined with firm data
+```
 
 ### Key Technical Considerations
-- SEC FOIA CSVs use **latin-1 encoding** and contain ~448 columns; only ~16 are relevant
-- IAPD does not have a public bulk API — scraping or structured queries required
-- Form ADV CCO email field is frequently empty; multi-source fallback is essential
-- Rate limiting needed for any web scraping (SEC, IAPD, firm websites)
-- Hunter.io free tier: 50 searches/month — budget carefully or use alternatives
-- Near-threshold detection requires AUM parsing + state registration count from Form ADV Section D
+
+- SEC FOIA CSVs use **latin-1 encoding** and contain ~448 columns; only ~17 are relevant
+- Form ADV PDFs contain names/titles but NOT email/phone — Hunter.io fills the gap
+- Multiple contacts per firm (not just the "best" one)
+- Hunter.io paid plan: 2,000 credits/month — per-batch credit limit configurable in UI
+- Rate limiting: 1 req/sec for SEC PDF downloads
+- Caching: firms processed within 30 days are automatically skipped
 
 ## Commands
 

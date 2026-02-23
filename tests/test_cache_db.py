@@ -1,14 +1,16 @@
-"""Tests for cache_db.py — database CRUD, dedup, cache expiry."""
+"""Tests for cache_db.py — database CRUD, multi-contact, cache expiry."""
 
 import pytest
 from datetime import datetime, timedelta
 from tools.cache_db import (
     init_db, get_connection, upsert_firms, get_firms, get_firm_by_crd,
-    update_firm_score, upsert_form_adv, get_form_adv, get_stale_form_adv_crds,
-    upsert_contact, get_contact, get_unenriched_crds, update_contact_validation,
+    upsert_form_adv, get_form_adv, get_stale_form_adv_crds,
+    insert_contact, get_contact, get_contacts_for_firm,
+    get_all_contacts_with_firms, delete_contacts_for_firm,
+    update_contact_email, get_contact_stats,
     log_enrichment, get_enrichment_stats, get_monthly_hunter_credits,
     log_export, get_export_history,
-    get_pipeline_stats, get_pipeline_stage_stats,
+    get_pipeline_stats, get_unprocessed_crds,
 )
 
 
@@ -48,47 +50,14 @@ class TestFirms:
         firm = get_firm_by_crd(sample_firm['crd'], db_path=tmp_db)
         assert firm['aum'] == 200000000
 
-    def test_upsert_preserves_score(self, tmp_db, sample_firm):
-        upsert_firms([sample_firm], db_path=tmp_db)
-        update_firm_score(sample_firm['crd'], 85.0, 'high AUM', db_path=tmp_db)
-        # Re-upsert should not overwrite score
-        sample_firm['aum'] = 200000000
-        upsert_firms([sample_firm], db_path=tmp_db)
-        firm = get_firm_by_crd(sample_firm['crd'], db_path=tmp_db)
-        assert firm['fit_score'] == 85.0
-
     def test_upsert_empty_list(self, tmp_db):
         count = upsert_firms([], db_path=tmp_db)
         assert count == 0
 
-    def test_get_firms_filter_track(self, tmp_db, sample_firm, sample_firm_near_threshold):
-        upsert_firms([sample_firm, sample_firm_near_threshold], db_path=tmp_db)
-        track_a = get_firms(track='A', db_path=tmp_db)
-        track_b = get_firms(track='B', db_path=tmp_db)
-        assert len(track_a) == 1
-        assert track_a[0]['company'] == 'Test Wealth Management LLC'
-        assert len(track_b) == 1
-        assert track_b[0]['company'] == 'Growing Advisory Partners'
-
-    def test_get_firms_filter_score(self, tmp_db, sample_firm):
-        upsert_firms([sample_firm], db_path=tmp_db)
-        update_firm_score(sample_firm['crd'], 70.0, 'good fit', db_path=tmp_db)
-        results = get_firms(min_score=80, db_path=tmp_db)
-        assert len(results) == 0
-        results = get_firms(min_score=50, db_path=tmp_db)
-        assert len(results) == 1
-
-    def test_get_firms_filter_contact(self, tmp_db, sample_firm, sample_contact):
-        upsert_firms([sample_firm], db_path=tmp_db)
-        # No contact yet
-        no_contact = get_firms(has_contact=False, db_path=tmp_db)
-        assert len(no_contact) == 1
-        has_contact = get_firms(has_contact=True, db_path=tmp_db)
-        assert len(has_contact) == 0
-        # Add contact
-        upsert_contact(sample_firm['crd'], sample_contact, db_path=tmp_db)
-        has_contact = get_firms(has_contact=True, db_path=tmp_db)
-        assert len(has_contact) == 1
+    def test_get_firms_returns_all(self, tmp_db, sample_firm, sample_firm_120day):
+        upsert_firms([sample_firm, sample_firm_120day], db_path=tmp_db)
+        firms = get_firms(db_path=tmp_db)
+        assert len(firms) == 2
 
 
 class TestFormAdv:
@@ -128,105 +97,190 @@ class TestFormAdv:
         assert sample_firm['crd'] in stale
 
 
-class TestContacts:
-    def test_upsert_and_get(self, tmp_db, sample_firm, sample_contact):
+class TestMultiContacts:
+    def test_insert_contact(self, tmp_db, sample_firm):
         upsert_firms([sample_firm], db_path=tmp_db)
-        upsert_contact(sample_firm['crd'], sample_contact, db_path=tmp_db)
-        contact = get_contact(sample_firm['crd'], db_path=tmp_db)
-        assert contact is not None
-        assert contact['contact_email'] == 'eheiting@testwm.com'
-        assert contact['source'] == 'hunter_io'
-
-    def test_keeps_higher_confidence(self, tmp_db, sample_firm, sample_contact):
-        upsert_firms([sample_firm], db_path=tmp_db)
-        upsert_contact(sample_firm['crd'], sample_contact, db_path=tmp_db)
-        # Try to upsert a lower-confidence contact
-        weak_contact = {
-            'contact_name': 'John Doe',
-            'contact_email': 'jdoe@testwm.com',
-            'source': 'website_scrape',
-            'confidence': 30.0,
-        }
-        upsert_contact(sample_firm['crd'], weak_contact, db_path=tmp_db)
-        contact = get_contact(sample_firm['crd'], db_path=tmp_db)
-        assert contact['contact_name'] == 'Eric Heiting'  # Higher confidence kept
-
-    def test_replaces_lower_confidence(self, tmp_db, sample_firm):
-        upsert_firms([sample_firm], db_path=tmp_db)
-        weak = {'contact_name': 'Weak', 'contact_email': 'w@test.com',
-                'source': 'scrape', 'confidence': 30.0}
-        upsert_contact(sample_firm['crd'], weak, db_path=tmp_db)
-        strong = {'contact_name': 'Strong', 'contact_email': 's@test.com',
-                  'source': 'hunter', 'confidence': 90.0}
-        upsert_contact(sample_firm['crd'], strong, db_path=tmp_db)
-        contact = get_contact(sample_firm['crd'], db_path=tmp_db)
-        assert contact['contact_name'] == 'Strong'
-
-    def test_unenriched_crds(self, tmp_db, sample_firm, sample_firm_120day):
-        upsert_firms([sample_firm, sample_firm_120day], db_path=tmp_db)
-        unenriched = get_unenriched_crds(db_path=tmp_db)
-        assert len(unenriched) == 2
-        # Enrich one
-        upsert_contact(sample_firm['crd'], {
-            'contact_name': 'Test', 'contact_email': 't@test.com',
-            'source': 'test', 'confidence': 50.0,
+        contact_id = insert_contact(sample_firm['crd'], {
+            'contact_name': 'Jane Doe',
+            'contact_title': 'CCO',
+            'source': 'pdf_cco',
+            'confidence': 80.0,
         }, db_path=tmp_db)
-        unenriched = get_unenriched_crds(db_path=tmp_db)
-        assert len(unenriched) == 1
-        assert unenriched[0] == sample_firm_120day['crd']
+        assert contact_id is not None
+        assert isinstance(contact_id, int)
 
-    def test_validation_update(self, tmp_db, sample_firm, sample_contact):
+    def test_insert_multiple_contacts(self, tmp_db, sample_firm):
         upsert_firms([sample_firm], db_path=tmp_db)
-        upsert_contact(sample_firm['crd'], sample_contact, db_path=tmp_db)
-        contact = get_contact(sample_firm['crd'], db_path=tmp_db)
-        update_contact_validation(contact['id'], 'valid', None, db_path=tmp_db)
-        contact = get_contact(sample_firm['crd'], db_path=tmp_db)
-        assert contact['validation_status'] == 'valid'
+        insert_contact(sample_firm['crd'], {
+            'contact_name': 'Jane Doe',
+            'contact_title': 'CCO',
+            'source': 'pdf_cco',
+        }, db_path=tmp_db)
+        insert_contact(sample_firm['crd'], {
+            'contact_name': 'John Smith',
+            'contact_title': 'Principal/Owner',
+            'source': 'pdf_principal',
+        }, db_path=tmp_db)
+        contacts = get_contacts_for_firm(sample_firm['crd'], db_path=tmp_db)
+        assert len(contacts) == 2
 
-    def test_upsert_parses_first_last_name(self, tmp_db, sample_firm):
+    def test_get_contacts_for_firm(self, tmp_db, sample_firm, sample_firm_120day):
+        upsert_firms([sample_firm, sample_firm_120day], db_path=tmp_db)
+        insert_contact(sample_firm['crd'], {
+            'contact_name': 'Jane Doe', 'source': 'pdf',
+        }, db_path=tmp_db)
+        insert_contact(sample_firm_120day['crd'], {
+            'contact_name': 'Bob Smith', 'source': 'pdf',
+        }, db_path=tmp_db)
+        # Each firm gets only its own contacts
+        contacts_1 = get_contacts_for_firm(sample_firm['crd'], db_path=tmp_db)
+        contacts_2 = get_contacts_for_firm(sample_firm_120day['crd'], db_path=tmp_db)
+        assert len(contacts_1) == 1
+        assert len(contacts_2) == 1
+        assert contacts_1[0]['contact_name'] == 'Jane Doe'
+        assert contacts_2[0]['contact_name'] == 'Bob Smith'
+
+    def test_get_all_contacts_with_firms(self, tmp_db, sample_firm, sample_firm_120day):
+        upsert_firms([sample_firm, sample_firm_120day], db_path=tmp_db)
+        insert_contact(sample_firm['crd'], {
+            'contact_name': 'Jane Doe', 'contact_title': 'CCO', 'source': 'pdf',
+        }, db_path=tmp_db)
+        insert_contact(sample_firm_120day['crd'], {
+            'contact_name': 'Bob Smith', 'contact_title': 'Partner', 'source': 'pdf',
+        }, db_path=tmp_db)
+        all_contacts = get_all_contacts_with_firms(db_path=tmp_db)
+        assert len(all_contacts) == 2
+        # Should have firm data joined
+        for c in all_contacts:
+            assert 'company' in c
+            assert 'state' in c
+            assert 'contact_name' in c
+
+    def test_delete_contacts_for_firm(self, tmp_db, sample_firm):
         upsert_firms([sample_firm], db_path=tmp_db)
-        contact = {
+        insert_contact(sample_firm['crd'], {
+            'contact_name': 'Jane Doe', 'source': 'pdf',
+        }, db_path=tmp_db)
+        insert_contact(sample_firm['crd'], {
+            'contact_name': 'John Smith', 'source': 'pdf',
+        }, db_path=tmp_db)
+        assert len(get_contacts_for_firm(sample_firm['crd'], db_path=tmp_db)) == 2
+        delete_contacts_for_firm(sample_firm['crd'], db_path=tmp_db)
+        assert len(get_contacts_for_firm(sample_firm['crd'], db_path=tmp_db)) == 0
+
+    def test_update_contact_email(self, tmp_db, sample_firm):
+        upsert_firms([sample_firm], db_path=tmp_db)
+        contact_id = insert_contact(sample_firm['crd'], {
+            'contact_name': 'Jane Doe',
+            'contact_title': 'CCO',
+            'source': 'pdf_cco',
+        }, db_path=tmp_db)
+        update_contact_email(contact_id, 'jane@testwm.com', '212-555-9999',
+                             db_path=tmp_db)
+        contacts = get_contacts_for_firm(sample_firm['crd'], db_path=tmp_db)
+        assert contacts[0]['contact_email'] == 'jane@testwm.com'
+        assert contacts[0]['contact_phone'] == '212-555-9999'
+
+    def test_update_contact_email_without_phone(self, tmp_db, sample_firm):
+        upsert_firms([sample_firm], db_path=tmp_db)
+        contact_id = insert_contact(sample_firm['crd'], {
+            'contact_name': 'Jane Doe', 'source': 'pdf',
+        }, db_path=tmp_db)
+        update_contact_email(contact_id, 'jane@testwm.com', db_path=tmp_db)
+        contacts = get_contacts_for_firm(sample_firm['crd'], db_path=tmp_db)
+        assert contacts[0]['contact_email'] == 'jane@testwm.com'
+
+    def test_insert_parses_first_last_name(self, tmp_db, sample_firm):
+        upsert_firms([sample_firm], db_path=tmp_db)
+        insert_contact(sample_firm['crd'], {
             'contact_name': 'Brandon Smith',
-            'contact_email': 'brandon@test.com',
-            'source': 'test', 'confidence': 80.0,
-        }
-        upsert_contact(sample_firm['crd'], contact, db_path=tmp_db)
-        result = get_contact(sample_firm['crd'], db_path=tmp_db)
-        assert result['first_name'] == 'Brandon'
-        assert result['last_name'] == 'Smith'
+            'source': 'pdf', 'confidence': 80.0,
+        }, db_path=tmp_db)
+        contacts = get_contacts_for_firm(sample_firm['crd'], db_path=tmp_db)
+        assert contacts[0]['first_name'] == 'Brandon'
+        assert contacts[0]['last_name'] == 'Smith'
 
-    def test_upsert_explicit_name_fields(self, tmp_db, sample_firm):
+
+class TestUnprocessedCrds:
+    def test_all_unprocessed(self, tmp_db, sample_firm, sample_firm_120day):
+        upsert_firms([sample_firm, sample_firm_120day], db_path=tmp_db)
+        unprocessed = get_unprocessed_crds(
+            [sample_firm['crd'], sample_firm_120day['crd']], db_path=tmp_db
+        )
+        assert len(unprocessed) == 2
+
+    def test_skips_recently_processed(self, tmp_db, sample_firm, sample_firm_120day,
+                                       sample_form_adv):
+        upsert_firms([sample_firm, sample_firm_120day], db_path=tmp_db)
+        upsert_form_adv(sample_firm['crd'], sample_form_adv, db_path=tmp_db)
+        unprocessed = get_unprocessed_crds(
+            [sample_firm['crd'], sample_firm_120day['crd']], db_path=tmp_db
+        )
+        assert len(unprocessed) == 1
+        assert unprocessed[0] == sample_firm_120day['crd']
+
+    def test_includes_old_processed(self, tmp_db, sample_firm, sample_form_adv):
         upsert_firms([sample_firm], db_path=tmp_db)
-        contact = {
-            'contact_name': 'B Smith',
-            'first_name': 'Brandon',
-            'last_name': 'Smith',
-            'contact_email': 'brandon@test.com',
-            'source': 'hunter_io', 'confidence': 90.0,
-        }
-        upsert_contact(sample_firm['crd'], contact, db_path=tmp_db)
-        result = get_contact(sample_firm['crd'], db_path=tmp_db)
-        assert result['first_name'] == 'Brandon'
-        assert result['last_name'] == 'Smith'
+        upsert_form_adv(sample_firm['crd'], sample_form_adv, db_path=tmp_db)
+        # Set scraped_at to 60 days ago
+        conn = get_connection(tmp_db)
+        old_date = (datetime.utcnow() - timedelta(days=60)).isoformat()
+        conn.execute(
+            "UPDATE form_adv_details SET scraped_at=? WHERE crd=?",
+            (old_date, sample_firm['crd'])
+        )
+        conn.commit()
+        conn.close()
+        unprocessed = get_unprocessed_crds(
+            [sample_firm['crd']], max_age_days=30, db_path=tmp_db
+        )
+        assert sample_firm['crd'] in unprocessed
+
+
+class TestContactStats:
+    def test_empty_db(self, tmp_db):
+        stats = get_contact_stats(db_path=tmp_db)
+        assert stats['total_contacts'] == 0
+        assert stats['with_email'] == 0
+        assert stats['without_email'] == 0
+        assert stats['firms_processed'] == 0
+
+    def test_with_data(self, tmp_db, sample_firm, sample_form_adv):
+        upsert_firms([sample_firm], db_path=tmp_db)
+        upsert_form_adv(sample_firm['crd'], sample_form_adv, db_path=tmp_db)
+        insert_contact(sample_firm['crd'], {
+            'contact_name': 'Jane Doe',
+            'contact_email': 'jane@test.com',
+            'source': 'pdf',
+        }, db_path=tmp_db)
+        insert_contact(sample_firm['crd'], {
+            'contact_name': 'John Smith',
+            'source': 'pdf',
+        }, db_path=tmp_db)
+        stats = get_contact_stats(db_path=tmp_db)
+        assert stats['total_contacts'] == 2
+        assert stats['with_email'] == 1
+        assert stats['without_email'] == 1
+        assert stats['firms_processed'] == 1
 
 
 class TestEnrichmentLog:
     def test_log_and_stats(self, tmp_db, sample_firm):
         upsert_firms([sample_firm], db_path=tmp_db)
-        log_enrichment(sample_firm['crd'], 'hunter_io', '/domain-search',
+        log_enrichment(sample_firm['crd'], 'hunter_io', '/email-finder',
                        200, 'success', credits_used=1, db_path=tmp_db)
         log_enrichment(sample_firm['crd'], 'hunter_io', '/email-finder',
                        200, 'not_found', credits_used=1, db_path=tmp_db)
-        log_enrichment(sample_firm['crd'], 'website_scrape', '/contact',
+        log_enrichment(sample_firm['crd'], 'pdf_extraction', 'form_adv_pdf',
                        200, 'success', credits_used=0, db_path=tmp_db)
         stats = get_enrichment_stats(db_path=tmp_db)
         hunter = next(s for s in stats if s['api_source'] == 'hunter_io')
         assert hunter['total_calls'] == 2
         assert hunter['total_credits'] == 2
         assert hunter['successes'] == 1
-        scrape = next(s for s in stats if s['api_source'] == 'website_scrape')
-        assert scrape['total_calls'] == 1
-        assert scrape['total_credits'] == 0
+        pdf = next(s for s in stats if s['api_source'] == 'pdf_extraction')
+        assert pdf['total_calls'] == 1
+        assert pdf['total_credits'] == 0
 
 
 class TestMonthlyHunterCredits:
@@ -236,7 +290,7 @@ class TestMonthlyHunterCredits:
 
     def test_counts_current_month(self, tmp_db, sample_firm):
         upsert_firms([sample_firm], db_path=tmp_db)
-        log_enrichment(sample_firm['crd'], 'hunter_io', '/domain-search',
+        log_enrichment(sample_firm['crd'], 'hunter_io', '/email-finder',
                        200, 'success', credits_used=1, db_path=tmp_db)
         log_enrichment(sample_firm['crd'], 'hunter_io', '/email-finder',
                        200, 'success', credits_used=1, db_path=tmp_db)
@@ -245,9 +299,9 @@ class TestMonthlyHunterCredits:
 
     def test_excludes_non_hunter_calls(self, tmp_db, sample_firm):
         upsert_firms([sample_firm], db_path=tmp_db)
-        log_enrichment(sample_firm['crd'], 'hunter_io', '/domain-search',
+        log_enrichment(sample_firm['crd'], 'hunter_io', '/email-finder',
                        200, 'success', credits_used=1, db_path=tmp_db)
-        log_enrichment(sample_firm['crd'], 'website_scrape', '/homepage',
+        log_enrichment(sample_firm['crd'], 'pdf_extraction', 'form_adv_pdf',
                        200, 'success', credits_used=0, db_path=tmp_db)
         credits = get_monthly_hunter_credits(db_path=tmp_db)
         assert credits == 1
@@ -258,7 +312,7 @@ class TestMonthlyHunterCredits:
         conn.execute("""
             INSERT INTO enrichment_log (crd, api_source, endpoint, status_code,
                 result_status, credits_used, called_at)
-            VALUES (?, 'hunter_io', '/domain-search', 200, 'success', 1, '2026-01-15T12:00:00')
+            VALUES (?, 'hunter_io', '/email-finder', 200, 'success', 1, '2026-01-15T12:00:00')
         """, (sample_firm['crd'],))
         conn.commit()
         conn.close()
@@ -268,7 +322,7 @@ class TestMonthlyHunterCredits:
 
 class TestExportHistory:
     def test_log_and_retrieve(self, tmp_db):
-        log_export('leads_2026_02.csv', 50, 'track=A,score>=70', db_path=tmp_db)
+        log_export('leads_2026_02.csv', 50, 'all contacts', db_path=tmp_db)
         history = get_export_history(db_path=tmp_db)
         assert len(history) == 1
         assert history[0]['filename'] == 'leads_2026_02.csv'
@@ -276,46 +330,27 @@ class TestExportHistory:
 
 
 class TestPipelineStats:
-    def test_full_funnel(self, tmp_db, sample_firm, sample_firm_120day,
-                         sample_contact):
-        upsert_firms([sample_firm, sample_firm_120day], db_path=tmp_db)
-        update_firm_score(sample_firm['crd'], 80.0, 'good', db_path=tmp_db)
-        upsert_contact(sample_firm['crd'], sample_contact, db_path=tmp_db)
-        update_contact_validation(
-            get_contact(sample_firm['crd'], db_path=tmp_db)['id'],
-            'valid', None, db_path=tmp_db
-        )
-        stats = get_pipeline_stats(db_path=tmp_db)
-        assert stats['total_firms'] == 2
-        assert stats['scored'] == 1
-        assert stats['enriched'] == 1
-        assert stats['validated'] == 1
-
-
-class TestPipelineStageStats:
     def test_empty_db(self, tmp_db):
-        stats = get_pipeline_stage_stats(db_path=tmp_db)
+        stats = get_pipeline_stats(db_path=tmp_db)
         assert stats['total_firms'] == 0
-        assert stats['iapd_queried'] == 0
-        assert stats['scored'] == 0
-        assert stats['enriched'] == 0
-        assert stats['validated'] == 0
-        assert stats['valid'] == 0
+        assert stats['firms_processed'] == 0
+        assert stats['total_contacts'] == 0
+        assert stats['contacts_with_email'] == 0
 
-    def test_with_data(self, tmp_db, sample_firm, sample_form_adv, sample_contact):
+    def test_full_pipeline(self, tmp_db, sample_firm, sample_form_adv):
         upsert_firms([sample_firm], db_path=tmp_db)
         upsert_form_adv(sample_firm['crd'], sample_form_adv, db_path=tmp_db)
-        update_firm_score(sample_firm['crd'], 80.0, 'good', db_path=tmp_db)
-        upsert_contact(sample_firm['crd'], sample_contact, db_path=tmp_db)
-        update_contact_validation(
-            get_contact(sample_firm['crd'], db_path=tmp_db)['id'],
-            'valid', None, db_path=tmp_db
-        )
-        stats = get_pipeline_stage_stats(db_path=tmp_db)
+        insert_contact(sample_firm['crd'], {
+            'contact_name': 'Jane Doe',
+            'contact_email': 'jane@test.com',
+            'source': 'pdf_cco',
+        }, db_path=tmp_db)
+        insert_contact(sample_firm['crd'], {
+            'contact_name': 'John Smith',
+            'source': 'pdf_principal',
+        }, db_path=tmp_db)
+        stats = get_pipeline_stats(db_path=tmp_db)
         assert stats['total_firms'] == 1
-        assert stats['iapd_queried'] == 1
-        assert stats['scored'] == 1
-        assert stats['enriched'] == 1
-        assert stats['validated'] == 1
-        assert stats['valid'] == 1
-        assert 'A' in stats['by_track']
+        assert stats['firms_processed'] == 1
+        assert stats['total_contacts'] == 2
+        assert stats['contacts_with_email'] == 1

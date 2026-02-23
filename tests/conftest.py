@@ -1,9 +1,7 @@
 """Shared pytest fixtures for SEC & Contact Research tests."""
 
-import os
-import tempfile
 import pytest
-from tools.cache_db import init_db, get_connection
+from tools.cache_db import init_db
 
 
 @pytest.fixture
@@ -21,7 +19,7 @@ def sample_firm():
         'crd': 999001,
         'company': 'Test Wealth Management LLC',
         'legal_name': 'Test Wealth Management LLC',
-        'status': 'Approved',
+        'status': '120-Day Approval',
         'status_date': '2026-01-15',
         'filing_date': '2026-01-10',
         'city': 'New York',
@@ -41,7 +39,7 @@ def sample_firm():
 
 @pytest.fixture
 def sample_firm_120day():
-    """A firm in 120-day approval status."""
+    """A second firm in 120-day approval status."""
     return {
         'crd': 999002,
         'company': 'Central Wealth Advisors',
@@ -61,31 +59,6 @@ def sample_firm_120day():
         'aum_discretionary': 80000000,
         'aum_nondiscretionary': 15000000,
         'track': 'A',
-    }
-
-
-@pytest.fixture
-def sample_firm_near_threshold():
-    """A state-registered firm near the SEC threshold."""
-    return {
-        'crd': 999003,
-        'company': 'Growing Advisory Partners',
-        'legal_name': 'Growing Advisory Partners LLC',
-        'status': 'Approved',
-        'status_date': '2025-06-15',
-        'filing_date': '2025-06-10',
-        'city': 'Dallas',
-        'state': 'TX',
-        'phone': '214-555-4567',
-        'website': 'https://www.growingadvisory.com',
-        'sec_registered': 'N',
-        'era': 'N',
-        'employees': 8,
-        'clients': 65,
-        'aum': 92000000,
-        'aum_discretionary': 75000000,
-        'aum_nondiscretionary': 17000000,
-        'track': 'B',
     }
 
 

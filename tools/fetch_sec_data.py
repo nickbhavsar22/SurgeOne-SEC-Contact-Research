@@ -2,9 +2,7 @@
 Tool 1: SEC FOIA Data Download & Parse
 
 Downloads the latest SEC investment adviser data CSV, parses it,
-and filters into two tracks:
-  Track A: 120-day approval firms (already filing for SEC registration)
-  Track B: Near-threshold state firms (AUM >= $90M, approaching SEC transition)
+and filters to 120-day approval firms (firms actively filing for SEC registration).
 """
 
 import io
@@ -44,7 +42,6 @@ COLUMN_MAP = {
     '5F(2)(c)': 'aum',
 }
 
-NEAR_THRESHOLD_AUM = 90_000_000  # $90M
 
 
 def _build_candidate_urls():
@@ -132,23 +129,13 @@ def parse_sec_dataframe(df):
 
 
 def classify_track(record):
-    """Classify a firm record into Track A, Track B, or None.
+    """Check if a firm is in 120-day approval status.
 
-    Track A: 120-day approval status
-    Track B: State-registered with AUM >= $90M (near SEC threshold)
+    Returns 'A' for 120-day approval firms, None otherwise.
     """
     status = (record.get('status') or '').strip()
-
-    # Track A: 120-day approval
     if '120' in status.lower() or 'pending' in status.lower():
         return 'A'
-
-    # Track B: State-registered, near threshold
-    sec_reg = (record.get('sec_registered') or '').upper().strip()
-    aum = record.get('aum') or 0
-    if sec_reg != 'Y' and aum >= NEAR_THRESHOLD_AUM:
-        return 'B'
-
     return None
 
 
@@ -174,14 +161,14 @@ def load_local_csv(file_path):
 
 
 def fetch_and_store(url=None, csv_path=None, db_path=None):
-    """Full pipeline: download SEC data, parse, classify, store.
+    """Full pipeline: download SEC data, parse, filter to 120-day approvals, store.
 
     Args:
         url: SEC ZIP URL to download from (optional)
         csv_path: Local CSV or ZIP file path (optional, takes priority over url)
         db_path: Database path (optional)
 
-    Returns dict with counts: {downloaded, track_a, track_b, skipped}.
+    Returns dict with counts: {downloaded, firms_imported, skipped}.
     """
     init_db(db_path)
 
@@ -190,32 +177,25 @@ def fetch_and_store(url=None, csv_path=None, db_path=None):
     else:
         df = download_sec_csv(url)
     if df is None:
-        return {'downloaded': 0, 'track_a': 0, 'track_b': 0, 'skipped': 0, 'error': 'Download failed'}
+        return {'downloaded': 0, 'firms_imported': 0, 'skipped': 0, 'error': 'Download failed'}
 
     records = parse_sec_dataframe(df)
 
-    track_a = []
-    track_b = []
+    imported = []
     skipped = 0
 
     for r in records:
-        track = classify_track(r)
-        if track == 'A':
+        if classify_track(r) == 'A':
             r['track'] = 'A'
-            track_a.append(r)
-        elif track == 'B':
-            r['track'] = 'B'
-            track_b.append(r)
+            imported.append(r)
         else:
             skipped += 1
 
-    all_targeted = track_a + track_b
-    upsert_firms(all_targeted, db_path=db_path)
+    upsert_firms(imported, db_path=db_path)
 
     return {
         'downloaded': len(records),
-        'track_a': len(track_a),
-        'track_b': len(track_b),
+        'firms_imported': len(imported),
         'skipped': skipped,
     }
 

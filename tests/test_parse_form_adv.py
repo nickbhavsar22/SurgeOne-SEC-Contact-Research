@@ -1,45 +1,21 @@
-"""Tests for tools/parse_form_adv.py — EDGAR CCO extraction."""
+"""Tests for tools/parse_form_adv.py — Form ADV PDF contact extraction."""
 
-import json
+import io
 from unittest.mock import patch, MagicMock
 
 import pytest
 
 from tools.parse_form_adv import (
-    _clean_company_name,
     _is_valid_person_name,
-    _extract_cco_from_13f_xml,
-    _extract_cco_from_form_d_xml,
     _format_phone,
-    search_edgar_cco,
-    extract_cco_batch,
+    _is_generic_email,
+    _extract_phone_near_name,
+    extract_contacts_from_pdf,
+    extract_contacts_batch,
 )
 
 
 # --- Unit tests for helpers ---
-
-class TestCleanCompanyName:
-    def test_strips_corporate_suffixes(self):
-        assert _clean_company_name("ACME CAPITAL, LLC") == "ACME"
-
-    def test_strips_multiple_suffixes(self):
-        assert _clean_company_name("ACME INVESTMENT ADVISORS, INC.") == "ACME"
-
-    def test_preserves_core_name(self):
-        name = _clean_company_name("DUPREE & COMPANY, INC.")
-        assert "DUPREE" in name
-
-    def test_truncates_long_names(self):
-        result = _clean_company_name("A" * 100 + " CAPITAL, LLC")
-        assert len(result) <= 40
-
-    def test_handles_empty(self):
-        assert _clean_company_name("") == ""
-
-    def test_comma_splits(self):
-        result = _clean_company_name("SMITH BARNEY, A DIVISION OF CITIGROUP")
-        assert "SMITH BARNEY" in result
-
 
 class TestIsValidPersonName:
     def test_valid_two_word_name(self):
@@ -67,6 +43,10 @@ class TestIsValidPersonName:
     def test_accepts_mixed_case_initials(self):
         assert _is_valid_person_name("William M. Ambrose") is True
 
+    def test_rejects_corporate_names(self):
+        assert _is_valid_person_name("Epogee Capital Management") is False
+        assert _is_valid_person_name("Spring Street Wealth") is False
+
 
 class TestFormatPhone:
     def test_ten_digits(self):
@@ -88,194 +68,234 @@ class TestFormatPhone:
         assert _format_phone("(212) 970-5713") == "212-970-5713"
 
 
-# --- Unit tests for XML extraction ---
+class TestIsGenericEmail:
+    def test_sec_gov(self):
+        assert _is_generic_email('filing@sec.gov') is True
 
-SAMPLE_13F_XML = """<?xml version="1.0"?>
-<edgarSubmission>
-  <coverPage>
-    <reportCalendarOrQuarter>12-31-2025</reportCalendarOrQuarter>
-    <filingManager><name>Test Capital LP</name></filingManager>
-    <crdNumber>00123456</crdNumber>
-  </coverPage>
-  <signatureBlock>
-    <name>Jane Doe</name>
-    <title>Chief Compliance Officer</title>
-    <phone>5551234567</phone>
-    <signature>Jane Doe</signature>
-    <city>New York</city>
-    <stateOrCountry>NY</stateOrCountry>
-    <signatureDate>02-14-2026</signatureDate>
-  </signatureBlock>
-</edgarSubmission>
-"""
+    def test_finra(self):
+        assert _is_generic_email('john@finra.org') is True
 
-SAMPLE_FORM_D_XML = """<?xml version="1.0"?>
-<edgarSubmission>
-  <offeringData>
-    <signatureBlock>
-      <signature>
-        <signatureName>/s/ Jane Doe</signatureName>
-        <nameOfSigner>Jane Doe</nameOfSigner>
-        <signatureTitle>Chief Compliance Officer</signatureTitle>
-        <signatureDate>2025-09-26</signatureDate>
-      </signature>
-    </signatureBlock>
-  </offeringData>
-</edgarSubmission>
-"""
+    def test_info_prefix(self):
+        assert _is_generic_email('info@company.com') is True
+
+    def test_compliance_prefix(self):
+        assert _is_generic_email('compliance@firm.com') is True
+
+    def test_personal_email(self):
+        assert _is_generic_email('jsmith@advisors.com') is False
+
+    def test_none_is_generic(self):
+        assert _is_generic_email(None) is True
+
+    def test_empty_is_generic(self):
+        assert _is_generic_email('') is True
 
 
-class TestExtractFrom13F:
-    def test_extracts_cco(self):
-        result = _extract_cco_from_13f_xml(SAMPLE_13F_XML)
-        assert result is not None
-        assert result['cco_name'] == 'Jane Doe'
-        assert result['cco_title'] == 'Chief Compliance Officer'
-        assert result['cco_phone'] == '555-123-4567'
+class TestExtractPhoneNearName:
+    def test_finds_phone_after_name(self):
+        text = "John Smith\nTelephone: (212) 555-1234\nFax: 212-555-9999"
+        result = _extract_phone_near_name(text, "John Smith")
+        assert result == "212-555-1234"
 
-    def test_returns_none_when_no_compliance_title(self):
-        xml = SAMPLE_13F_XML.replace('Chief Compliance Officer', 'CEO')
-        assert _extract_cco_from_13f_xml(xml) is None
+    def test_returns_none_when_no_phone(self):
+        text = "John Smith is the principal."
+        assert _extract_phone_near_name(text, "John Smith") is None
 
-    def test_returns_none_when_name_is_title(self):
-        xml = SAMPLE_13F_XML.replace('Jane Doe', 'Vice President')
-        assert _extract_cco_from_13f_xml(xml) is None
+    def test_returns_none_when_name_not_found(self):
+        text = "Jane Doe\nTelephone: 555-1234"
+        assert _extract_phone_near_name(text, "John Smith") is None
 
     def test_returns_none_on_empty(self):
-        assert _extract_cco_from_13f_xml("") is None
+        assert _extract_phone_near_name("", "John") is None
+        assert _extract_phone_near_name(None, "John") is None
+        assert _extract_phone_near_name("text", None) is None
 
 
-class TestExtractFromFormD:
-    def test_extracts_cco(self):
-        result = _extract_cco_from_form_d_xml(SAMPLE_FORM_D_XML)
-        assert result is not None
-        assert result['cco_name'] == 'Jane Doe'
-        assert 'Compliance Officer' in result['cco_title']
+# --- PDF extraction tests (mocked HTTP + pdfplumber) ---
 
-    def test_strips_signature_prefix(self):
-        result = _extract_cco_from_form_d_xml(SAMPLE_FORM_D_XML)
-        assert '/s/' not in result['cco_name']
+SAMPLE_PDF_TEXT_WITH_CONTACTS = """
+FORM ADV
+Part 1A
 
-    def test_returns_none_when_no_compliance(self):
-        xml = SAMPLE_FORM_D_XML.replace('Compliance Officer', 'CEO')
-        assert _extract_cco_from_form_d_xml(xml) is None
+your last, first, and middle names):
+John Michael Smith
+B. Registration details...
+
+J. Chief Compliance Officer
+Name: Jane Doe
+Other titles: Managing Director
+Telephone: (212) 555-9876
+
+Schedule A - Direct Owners
+Name: Robert Johnson
+Title: Senior Partner
+
+Full Legal Name: Sarah Williams
+Position: Vice President of Operations
+
+Email contacts: jsmith@testfirm.com
+jane.doe@testfirm.com
+info@testfirm.com
+"""
+
+SAMPLE_PDF_TEXT_NO_CONTACTS = """
+FORM ADV
+Part 1A
+
+This is a template form with no filled-in values.
+Name:
+Title:
+Telephone:
+"""
 
 
-# --- Integration tests (mocked HTTP) ---
+def _make_mock_pdf(text):
+    """Create a mock pdfplumber PDF that returns the given text."""
+    mock_page = MagicMock()
+    mock_page.extract_text.return_value = text
 
-class TestSearchEdgarCCO:
+    mock_pdf = MagicMock()
+    mock_pdf.pages = [mock_page]
+    mock_pdf.__enter__ = lambda self: self
+    mock_pdf.__exit__ = MagicMock(return_value=False)
+    return mock_pdf
+
+
+class TestExtractContactsFromPdf:
+    @patch('tools.parse_form_adv.pdfplumber.open')
     @patch('tools.parse_form_adv.requests.get')
-    def test_successful_13f_extraction(self, mock_get):
-        # Mock EFTS search response
-        efts_response = {
-            'hits': {
-                'total': {'value': 1},
-                'hits': [{
-                    '_id': '0001234567-26-000001:primary_doc.xml',
-                    '_source': {
-                        'ciks': ['0001234567'],
-                        'root_forms': ['13F-HR'],
-                        'file_date': '2026-01-15',
-                    },
-                }],
-            },
-        }
-        mock_efts = MagicMock()
-        mock_efts.status_code = 200
-        mock_efts.json.return_value = efts_response
-
-        mock_filing = MagicMock()
-        mock_filing.status_code = 200
-        mock_filing.text = SAMPLE_13F_XML
-
-        mock_get.side_effect = [mock_efts, mock_filing]
-
-        result = search_edgar_cco("Test Capital LP")
-        assert result is not None
-        assert result['cco_name'] == 'Jane Doe'
-        assert result['source'] == 'edgar_13F-HR'
-
-    @patch('tools.parse_form_adv.requests.get')
-    def test_returns_none_when_no_hits(self, mock_get):
-        empty_response = {'hits': {'total': {'value': 0}, 'hits': []}}
+    def test_extracts_principal_and_cco(self, mock_get, mock_pdf_open):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        mock_resp.json.return_value = empty_response
-
-        # Two searches (13F-HR + D), both empty
+        mock_resp.content = b'fake-pdf-bytes'
         mock_get.return_value = mock_resp
+        mock_pdf_open.return_value = _make_mock_pdf(SAMPLE_PDF_TEXT_WITH_CONTACTS)
 
-        result = search_edgar_cco("Nonexistent Firm")
-        assert result is None
+        contacts = extract_contacts_from_pdf(123456)
+        assert len(contacts) >= 2
+        names = [c['name'] for c in contacts]
+        assert 'John Michael Smith' in names
+        assert 'Jane Doe' in names
+        # Check titles
+        principal = next(c for c in contacts if c['name'] == 'John Michael Smith')
+        assert principal['title'] == 'Principal/Owner'
+        cco = next(c for c in contacts if c['name'] == 'Jane Doe')
+        assert cco['title'] == 'Chief Compliance Officer'
+
+    @patch('tools.parse_form_adv.pdfplumber.open')
+    @patch('tools.parse_form_adv.requests.get')
+    def test_extracts_emails(self, mock_get, mock_pdf_open):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = b'fake-pdf-bytes'
+        mock_get.return_value = mock_resp
+        mock_pdf_open.return_value = _make_mock_pdf(SAMPLE_PDF_TEXT_WITH_CONTACTS)
+
+        contacts = extract_contacts_from_pdf(123456)
+        # Should assign non-generic emails to contacts
+        emails = [c.get('email') for c in contacts if c.get('email')]
+        assert len(emails) >= 1
+        # info@ should be filtered as generic
+        assert 'info@testfirm.com' not in emails
+
+    @patch('tools.parse_form_adv.pdfplumber.open')
+    @patch('tools.parse_form_adv.requests.get')
+    def test_returns_empty_for_no_contacts(self, mock_get, mock_pdf_open):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = b'fake-pdf-bytes'
+        mock_get.return_value = mock_resp
+        mock_pdf_open.return_value = _make_mock_pdf(SAMPLE_PDF_TEXT_NO_CONTACTS)
+
+        contacts = extract_contacts_from_pdf(999999)
+        assert contacts == []
 
     @patch('tools.parse_form_adv.requests.get')
-    def test_handles_network_error(self, mock_get):
+    def test_returns_empty_on_http_error(self, mock_get):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 404
+        mock_get.return_value = mock_resp
+
+        contacts = extract_contacts_from_pdf(999999)
+        assert contacts == []
+
+    @patch('tools.parse_form_adv.requests.get')
+    def test_returns_empty_on_network_error(self, mock_get):
         import requests as req
-        mock_get.side_effect = req.RequestException("Network error")
+        mock_get.side_effect = req.RequestException("timeout")
 
-        result = search_edgar_cco("Test Firm")
-        assert result is None
+        contacts = extract_contacts_from_pdf(999999)
+        assert contacts == []
+
+    @patch('tools.parse_form_adv.pdfplumber.open')
+    @patch('tools.parse_form_adv.requests.get')
+    def test_contact_sources(self, mock_get, mock_pdf_open):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = b'fake-pdf-bytes'
+        mock_get.return_value = mock_resp
+        mock_pdf_open.return_value = _make_mock_pdf(SAMPLE_PDF_TEXT_WITH_CONTACTS)
+
+        contacts = extract_contacts_from_pdf(123456)
+        sources = {c['source'] for c in contacts}
+        # Should have at least principal and cco sources
+        assert 'pdf_principal' in sources
+        assert 'pdf_cco' in sources
 
 
-class TestExtractCCOBatch:
-    @patch('tools.parse_form_adv.extract_cco')
-    @patch('tools.parse_form_adv._get_stale_cco_crds')
-    @patch('tools.parse_form_adv.init_db')
-    def test_batch_counts(self, mock_init, mock_stale, mock_extract):
-        mock_stale.return_value = [1, 2, 3]
+class TestExtractContactsBatch:
+    @patch('tools.parse_form_adv.extract_contacts_from_pdf')
+    @patch('tools.parse_form_adv.time.sleep')
+    def test_batch_counts(self, mock_sleep, mock_extract, tmp_db, sample_firm,
+                           sample_firm_120day):
+        from tools.cache_db import upsert_firms
+        upsert_firms([sample_firm, sample_firm_120day], db_path=tmp_db)
+
         mock_extract.side_effect = [
-            {'cco_name': 'Jane Doe'},  # success
-            None,                       # no result
-            Exception("error"),         # error
+            [{'name': 'Jane Doe', 'title': 'CCO', 'email': None,
+              'phone': None, 'source': 'pdf_cco'}],
+            [],  # no contacts found
         ]
 
-        # Fix: the third call raises, so use side_effect properly
-        def side_effect(crd, company, db_path=None):
-            if crd == 1:
-                return {'cco_name': 'Jane Doe'}
-            elif crd == 2:
-                return None
-            else:
-                raise Exception("error")
+        result = extract_contacts_batch(
+            [sample_firm['crd'], sample_firm_120day['crd']],
+            db_path=tmp_db,
+        )
+        assert result['processed'] == 1
+        assert result['no_contacts'] == 1
+        assert result['errors'] == 0
 
-        mock_extract.side_effect = side_effect
+    @patch('tools.parse_form_adv.extract_contacts_from_pdf')
+    @patch('tools.parse_form_adv.time.sleep')
+    def test_skips_cached(self, mock_sleep, mock_extract, tmp_db, sample_firm,
+                           sample_form_adv):
+        from tools.cache_db import upsert_firms, upsert_form_adv
+        upsert_firms([sample_firm], db_path=tmp_db)
+        # Mark as recently processed
+        upsert_form_adv(sample_firm['crd'], sample_form_adv, db_path=tmp_db)
 
-        pairs = [(1, 'Firm A'), (2, 'Firm B'), (3, 'Firm C')]
-        result = extract_cco_batch(pairs)
-
-        assert result['extracted'] == 1
-        assert result['no_result'] == 1
-        assert result['errors'] == 1
-        assert result['cached'] == 0
-
-    @patch('tools.parse_form_adv.extract_cco')
-    @patch('tools.parse_form_adv._get_stale_cco_crds')
-    @patch('tools.parse_form_adv.init_db')
-    def test_skips_cached(self, mock_init, mock_stale, mock_extract):
-        # CRD 1 is stale, CRD 2 is cached (not in stale list)
-        mock_stale.return_value = [1]
-        mock_extract.return_value = {'cco_name': 'Jane Doe'}
-
-        pairs = [(1, 'Firm A'), (2, 'Firm B')]
-        result = extract_cco_batch(pairs)
-
-        assert result['extracted'] == 1
+        result = extract_contacts_batch(
+            [sample_firm['crd']], db_path=tmp_db,
+        )
         assert result['cached'] == 1
+        mock_extract.assert_not_called()
 
-    @patch('tools.parse_form_adv.extract_cco')
-    @patch('tools.parse_form_adv._get_stale_cco_crds')
-    @patch('tools.parse_form_adv.init_db')
-    def test_progress_callback(self, mock_init, mock_stale, mock_extract):
-        mock_stale.return_value = [1]
-        mock_extract.return_value = {'cco_name': 'Test'}
+    @patch('tools.parse_form_adv.extract_contacts_from_pdf')
+    @patch('tools.parse_form_adv.time.sleep')
+    def test_progress_callback(self, mock_sleep, mock_extract, tmp_db,
+                                sample_firm, sample_firm_120day):
+        from tools.cache_db import upsert_firms
+        upsert_firms([sample_firm, sample_firm_120day], db_path=tmp_db)
+        mock_extract.return_value = []
 
         calls = []
         def callback(current, total, results):
             calls.append((current, total))
 
-        pairs = [(1, 'Firm A'), (2, 'Firm B')]
-        extract_cco_batch(pairs, progress_callback=callback)
-
+        extract_contacts_batch(
+            [sample_firm['crd'], sample_firm_120day['crd']],
+            db_path=tmp_db, progress_callback=callback,
+        )
         assert len(calls) == 2
         assert calls[0] == (1, 2)
         assert calls[1] == (2, 2)
