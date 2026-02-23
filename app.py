@@ -113,6 +113,11 @@ def page_pipeline(stats):
 - **Track B (Near-Threshold):** State-registered firms with AUM near $90-100M — they'll need to transition to SEC registration soon.
 
 **What you need to do:** Upload the CSV from [sec.gov/foia](https://www.sec.gov/foia), use pre-downloaded data if available, or try auto-detection. Takes ~30 seconds.
+
+📡 **Data Sources:**
+- [SEC Investment Adviser Data](https://www.sec.gov/data-research/sec-markets-data/information-about-registered-investment-advisers-exempt-reporting-advisers) — landing page with downloadable ZIP/CSV files
+- [IAPD Compilation Page](https://adviserinfo.sec.gov/compilation) — newer download location (Jan 2025+)
+- Download pattern: `ia{mmddyy}.zip` files from the SEC data directory
 """)
     if stages[1]['enabled']:
         _stage_1_content()
@@ -131,6 +136,10 @@ def page_pipeline(stats):
 Note: CCO name/email data is rarely available from this API endpoint — contact discovery happens in Stage 4.
 
 **What you need to do:** Select a track (or Both) and click Run. Rate-limited to ~1 request/second, so expect **~1 second per firm**. Safe to re-run — already-queried firms (within 30 days) are skipped.
+
+📡 **Data Sources:**
+- [IAPD Search API](https://api.adviserinfo.sec.gov/) — JSON API returning firm registration details (queried per CRD number)
+- [IAPD Firm Viewer](https://adviserinfo.sec.gov/firm/summary/) — human-readable Form ADV detail page (append CRD to URL)
 """)
     if stages[2]['enabled']:
         _stage_2_content()
@@ -154,6 +163,8 @@ Note: CCO name/email data is rarely available from this API endpoint — contact
 No API calls — purely data-based scoring, runs instantly.
 
 **What you need to do:** Select a track and click Run. Firms scoring 70+ are strong outreach candidates.
+
+📡 **Data Sources:** None — runs locally using data already collected in previous stages.
 """)
     if stages[3]['enabled']:
         _stage_3_content()
@@ -176,6 +187,11 @@ No API calls — purely data-based scoring, runs instantly.
 Generic/role-based emails (info@, reporting@, compliance@, etc.) are automatically filtered out.
 
 **What you need to do:** Select a track and click Run. Website scraping takes **~5-6 seconds per firm**. Safe to re-run — firms with existing contacts are skipped.
+
+📡 **Data Sources:**
+- [Hunter.io Domain Search](https://hunter.io/api-documentation#domain-search) — finds emails associated with a firm's domain
+- [Hunter.io Email Finder](https://hunter.io/api-documentation#email-finder) — finds a specific person's email by name + domain
+- Firm websites — scrapes homepage + /contact, /about, /team, /leadership, and 8 other subpages
 """)
     if stages[4]['enabled']:
         _stage_4_content()
@@ -200,6 +216,8 @@ Generic/role-based emails (info@, reporting@, compliance@, etc.) are automatical
 Results: **Valid** (all checks pass), **Suspect** (has email but some warnings), **Invalid** (no email or bad format).
 
 **What you need to do:** Select a track and click Run. Instant — no API calls. Review suspect contacts in Firm Explorer before exporting.
+
+📡 **Data Sources:** None — runs locally using data already collected in previous stages.
 """)
     if stages[5]['enabled']:
         _stage_5_content()
@@ -384,6 +402,13 @@ def _stage_2_content():
         "Searches SEC EDGAR filings (13F-HR, Form D) for Chief Compliance Officer "
         "names and phone numbers. Extracted CCO names are used by Step 4 of the "
         "contact enrichment waterfall to find emails via Hunter.io."
+    )
+    st.markdown(
+        "📡 **Data Sources:** "
+        "[EDGAR Full-Text Search](https://efts.sec.gov/LATEST/search-index) — "
+        "searches 13F-HR and Form D filings for \"compliance officer\" · "
+        "[EDGAR Filing Archives](https://www.sec.gov/cgi-bin/browse-edgar) — "
+        "individual filing documents (XML/HTML)"
     )
 
     col_a, col_b = st.columns([3, 1])
