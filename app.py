@@ -23,12 +23,11 @@ from tools.cache_db import (
     get_monthly_hunter_credits, get_unprocessed_crds,
 )
 from tools.fetch_sec_data import fetch_and_store, probe_sec_urls
-from tools.parse_form_adv import extract_contacts_batch
 from tools.enrich_contacts import (
-    enrich_contacts_batch, HUNTER_API_KEY, DEFAULT_BATCH_CREDIT_LIMIT,
+    research_firms_batch, HUNTER_API_KEY, DEFAULT_BATCH_CREDIT_LIMIT,
 )
 
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.5.1"
 LOGO_PATH = Path(__file__).parent / "assets" / "logo.png"
 
 # --- Page Config ---
@@ -388,7 +387,11 @@ def _section_import():
 # ============================================================
 
 def _section_research(stats):
-    """Research firms — PDF extraction + Hunter.io enrichment."""
+    """Research firms — Hunter.io Domain Search finds contacts + emails."""
+
+    if not HUNTER_API_KEY:
+        st.warning("Hunter.io not configured. Add `HUNTER_API_KEY` to `.env` to start research.")
+        return
 
     # Get list of unprocessed firms
     all_firms = get_firms()
@@ -415,17 +418,17 @@ def _section_research(stats):
             value=min(10, len(unprocessed)),
             step=1,
             key="batch_size",
-            help="Number of unprocessed firms to research this run. Each firm takes ~2-3 seconds.",
+            help="Number of unprocessed firms to research. Each uses 1 Hunter.io credit.",
         )
     with col2:
         credit_limit = st.number_input(
             "Hunter.io credit limit (this run)",
             min_value=0,
             max_value=2000,
-            value=min(DEFAULT_BATCH_CREDIT_LIMIT, len(unprocessed) * 3),
+            value=min(DEFAULT_BATCH_CREDIT_LIMIT, len(unprocessed)),
             step=10,
             key="credit_limit",
-            help="Max Hunter.io credits to use. Each contact uses ~1 credit. 0 = no limit.",
+            help="Max Hunter.io credits to use. Each firm uses 1 credit. 0 = no limit.",
         )
 
     run_btn = st.button("Start Research", type="primary", key="btn_research")
@@ -434,100 +437,54 @@ def _section_research(stats):
     if 'last_research_result' in st.session_state:
         result = st.session_state.pop('last_research_result')
         col_a, col_b, col_c, col_d = st.columns(4)
-        col_a.metric("Firms Processed", result.get('pdf_processed', 0))
-        col_b.metric("Contacts Found", result.get('pdf_contacts', 0))
-        col_c.metric("Emails Found", result.get('emails_found', 0))
+        col_a.metric("Firms Processed", result.get('processed', 0))
+        col_b.metric("Contacts Found", result.get('contacts_found', 0))
+        col_c.metric("Skipped (no domain)", result.get('skipped', 0))
         col_d.metric("Credits Used", result.get('credits_used', 0))
 
     if run_btn:
         firms_to_process = unprocessed[:batch_size]
 
-        # Phase 1: PDF Extraction
-        st.subheader("Reading Form ADV PDFs...")
-        progress_bar = st.progress(0, text="Starting PDF extraction...")
+        st.subheader("Searching Hunter.io for contacts...")
+        progress_bar = st.progress(0, text="Starting domain search...")
         status_text = st.empty()
         start_time = time.time()
 
-        def _on_pdf_progress(current, total, res):
+        def _on_progress(current, total, res):
             progress_bar.progress(
                 current / total,
-                text=f"Reading PDF {current} / {total}",
+                text=f"Researching firm {current} / {total}",
             )
             elapsed = time.time() - start_time
             status_text.text(
-                f"Processed: {res['processed']} | "
                 f"Contacts found: {res['contacts_found']} | "
-                f"No contacts: {res['no_contacts']} | "
-                f"Errors: {res['errors']} | "
+                f"Firms with results: {res['processed']} | "
+                f"Skipped: {res['skipped']} | "
+                f"Credits: {res['credits_used']} | "
                 f"Elapsed: {elapsed:.0f}s"
             )
 
-        pdf_result = extract_contacts_batch(
+        result = research_firms_batch(
             firms_to_process,
-            progress_callback=_on_pdf_progress,
+            credit_limit=credit_limit,
+            progress_callback=_on_progress,
         )
         elapsed = time.time() - start_time
-        progress_bar.progress(1.0, text=f"PDF extraction complete! ({elapsed:.0f}s)")
+        progress_bar.progress(1.0, text=f"Research complete! ({elapsed:.0f}s)")
         status_text.empty()
 
         st.success(
-            f"Extracted **{pdf_result['contacts_found']}** contacts from "
-            f"**{pdf_result['processed']}** firms"
+            f"Found **{result['contacts_found']}** contacts across "
+            f"**{result['processed']}** firms using "
+            f"**{result['credits_used']}** credits"
         )
-
-        # Phase 2: Hunter.io Enrichment
-        if HUNTER_API_KEY and credit_limit > 0:
-            st.subheader("Finding emails via Hunter.io...")
-            progress_bar2 = st.progress(0, text="Starting Hunter.io enrichment...")
-            status_text2 = st.empty()
-            start_time2 = time.time()
-
-            def _on_hunter_progress(current, total, res):
-                progress_bar2.progress(
-                    current / total,
-                    text=f"Enriching firm {current} / {total}",
-                )
-                elapsed2 = time.time() - start_time2
-                status_text2.text(
-                    f"Emails found: {res['enriched']} | "
-                    f"Not found: {res['no_result']} | "
-                    f"Credits: {res['credits_used']} | "
-                    f"Elapsed: {elapsed2:.0f}s"
-                )
-
-            hunter_result = enrich_contacts_batch(
-                firms_to_process,
-                credit_limit=credit_limit,
-                progress_callback=_on_hunter_progress,
-            )
-            elapsed2 = time.time() - start_time2
-            progress_bar2.progress(1.0, text=f"Enrichment complete! ({elapsed2:.0f}s)")
-            status_text2.empty()
-
-            emails_found = hunter_result['enriched']
-            credits_used = hunter_result['credits_used']
-
-            st.success(
-                f"Found **{emails_found}** emails using "
-                f"**{credits_used}** Hunter.io credits"
-            )
-            if hunter_result.get('credit_limit_hit'):
-                st.warning("Credit limit reached. Run again to continue with remaining contacts.")
-        elif not HUNTER_API_KEY:
-            st.info("Hunter.io not configured — skipping email enrichment. Add `HUNTER_API_KEY` to `.env`.")
-            emails_found = 0
-            credits_used = 0
-        else:
-            emails_found = 0
-            credits_used = 0
+        if result.get('credit_limit_hit'):
+            st.warning("Credit limit reached. Run again to continue.")
+        if result.get('skipped'):
+            st.info(f"{result['skipped']} firms skipped (no usable website domain).")
 
         # Store results for display after rerun
-        st.session_state['last_research_result'] = {
-            'pdf_processed': pdf_result['processed'],
-            'pdf_contacts': pdf_result['contacts_found'],
-            'emails_found': emails_found,
-            'credits_used': credits_used,
-        }
+        st.session_state['last_research_result'] = result
         st.rerun()
 
 

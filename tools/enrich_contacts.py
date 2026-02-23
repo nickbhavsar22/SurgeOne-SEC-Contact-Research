@@ -1,21 +1,25 @@
 """
-Tool: Hunter.io Contact Enrichment
+Tool: Hunter.io Contact Research
 
-For each contact extracted from Form ADV PDFs (name + title, but typically
-no email), uses Hunter.io Email Finder to look up their email address.
+For each firm, uses Hunter.io Domain Search to find ALL people at the firm's
+website domain — returning names, titles, emails, and phone numbers in one call.
+
+This replaces the previous two-step approach (PDF extraction + Email Finder).
+Each Domain Search uses 1 Hunter.io credit regardless of how many contacts
+are returned.
 
 Every API call is logged for credit tracking.
 """
 
 import os
-import re
+import logging
 
 import requests
 from dotenv import load_dotenv
 
 from tools.cache_db import (
-    init_db, get_firm_by_crd, get_contacts_for_firm, update_contact_email,
-    log_enrichment,
+    init_db, get_firm_by_crd, insert_contact, delete_contacts_for_firm,
+    get_unprocessed_crds, upsert_form_adv, log_enrichment,
 )
 
 load_dotenv()
@@ -29,8 +33,17 @@ try:
 except Exception:
     pass
 
+logger = logging.getLogger(__name__)
+
 HUNTER_API_KEY = os.getenv('HUNTER_API_KEY', '')
+HUNTER_DOMAIN_SEARCH = 'https://api.hunter.io/v2/domain-search'
 HUNTER_EMAIL_FINDER = 'https://api.hunter.io/v2/email-finder'
+
+# Domains that are social media / not useful for Hunter.io
+SOCIAL_MEDIA_DOMAINS = {
+    'linkedin.com', 'facebook.com', 'twitter.com', 'x.com',
+    'instagram.com', 'youtube.com', 'tiktok.com',
+}
 
 GENERIC_EMAIL_PREFIXES = {
     'info', 'support', 'admin', 'contact', 'sales', 'ir', 'help',
@@ -62,7 +75,7 @@ def _is_generic_email(email):
 
 
 def _extract_domain(url):
-    """Extract domain from a URL."""
+    """Extract domain from a URL. Returns None for social media domains."""
     if not url:
         return None
     url = url.strip().lower()
@@ -75,9 +88,83 @@ def _extract_domain(url):
         domain = domain.split(':')[0]
         if domain.startswith('www.'):
             domain = domain[4:]
-        return domain if domain else None
+        if not domain:
+            return None
+        # Skip social media domains
+        for social in SOCIAL_MEDIA_DOMAINS:
+            if domain == social or domain.endswith('.' + social):
+                return None
+        return domain
     except Exception:
         return None
+
+
+def domain_search(domain, crd=None, db_path=None):
+    """Search Hunter.io for all people at a domain.
+
+    Args:
+        domain: website domain to search (e.g., 'acmecapital.com')
+        crd: firm CRD number (for logging)
+        db_path: database path
+
+    Returns list of contacts: [{first_name, last_name, position, email,
+                                phone, confidence, source}]
+    Uses 1 Hunter.io credit.
+    """
+    if not HUNTER_API_KEY or not domain:
+        return []
+
+    try:
+        resp = requests.get(HUNTER_DOMAIN_SEARCH, params={
+            'domain': domain,
+            'api_key': HUNTER_API_KEY,
+            'limit': 20,
+            'type': 'personal',
+        }, timeout=15)
+
+        log_enrichment(
+            crd or 0, 'hunter_io', '/domain-search', resp.status_code,
+            'success' if resp.status_code == 200 else 'error',
+            credits_used=1, db_path=db_path,
+        )
+
+        if resp.status_code != 200:
+            return []
+
+        data = resp.json().get('data', {})
+        emails = data.get('emails', [])
+
+        contacts = []
+        for entry in emails:
+            email = entry.get('value')
+            if not email or _is_generic_email(email):
+                continue
+
+            first = entry.get('first_name')
+            last = entry.get('last_name')
+            if not first or not last:
+                continue
+
+            contacts.append({
+                'first_name': first,
+                'last_name': last,
+                'contact_name': f"{first} {last}",
+                'contact_title': entry.get('position') or None,
+                'contact_email': email,
+                'contact_phone': entry.get('phone_number') or None,
+                'confidence': entry.get('confidence', 0),
+                'source': 'hunter_domain_search',
+            })
+
+        return contacts
+
+    except requests.RequestException as e:
+        logger.error('Domain search failed for %s: %s', domain, e)
+        log_enrichment(
+            crd or 0, 'hunter_io', '/domain-search', 0, 'error',
+            db_path=db_path,
+        )
+        return []
 
 
 def enrich_contact_hunter(contact_id, first_name, last_name, domain, crd,
@@ -94,6 +181,8 @@ def enrich_contact_hunter(contact_id, first_name, last_name, domain, crd,
 
     Returns dict with email/phone or None. Uses 1 Hunter.io credit.
     """
+    from tools.cache_db import update_contact_email
+
     if not HUNTER_API_KEY or not first_name or not last_name or not domain:
         return None
 
@@ -124,31 +213,33 @@ def enrich_contact_hunter(contact_id, first_name, last_name, domain, crd,
     return None
 
 
-def enrich_contacts_batch(crd_list, credit_limit=None, db_path=None,
-                          progress_callback=None):
-    """Enrich all contacts for a list of firms using Hunter.io Email Finder.
+def research_firms_batch(crd_list, max_age_days=30, credit_limit=None,
+                         db_path=None, progress_callback=None):
+    """Research all firms in crd_list using Hunter.io Domain Search.
 
-    For each firm in crd_list, gets all contacts from the database that
-    don't have an email yet, and tries Hunter.io Email Finder for each.
+    For each unprocessed firm with a usable website domain:
+      1. Call Hunter.io Domain Search (1 credit)
+      2. Store all returned contacts in the database
+      3. Mark firm as processed (cached for max_age_days)
 
     Args:
-        crd_list: List of CRD numbers whose contacts to enrich.
-        credit_limit: Max Hunter.io credits for this batch.
-            None = use DEFAULT_BATCH_CREDIT_LIMIT.
+        crd_list: List of CRD numbers to research.
+        max_age_days: Skip firms processed within this many days.
+        credit_limit: Max Hunter.io credits. None = DEFAULT_BATCH_CREDIT_LIMIT.
             0 = no limit.
         db_path: Optional database path.
-        progress_callback: Optional callable(current, total, results).
+        progress_callback: Optional callable(current, total, results_dict).
 
-    Returns dict: {enriched, skipped, no_result, errors, credits_used,
-                   credit_limit_hit}
+    Returns dict: {processed, cached, skipped, no_contacts, errors,
+                   contacts_found, credits_used, credit_limit_hit, no_api_key}
     """
     init_db(db_path)
 
     if not HUNTER_API_KEY:
         return {
-            'enriched': 0, 'skipped': 0, 'no_result': 0, 'errors': 0,
-            'credits_used': 0, 'credit_limit_hit': False,
-            'no_api_key': True,
+            'processed': 0, 'cached': 0, 'skipped': 0, 'no_contacts': 0,
+            'errors': 0, 'contacts_found': 0, 'credits_used': 0,
+            'credit_limit_hit': False, 'no_api_key': True,
         }
 
     if credit_limit is None:
@@ -158,14 +249,24 @@ def enrich_contacts_batch(crd_list, credit_limit=None, db_path=None,
     else:
         effective_limit = credit_limit
 
+    unprocessed = set(get_unprocessed_crds(crd_list, max_age_days, db_path))
+
     credits_used = 0
     total = len(crd_list)
     results = {
-        'enriched': 0, 'skipped': 0, 'no_result': 0, 'errors': 0,
-        'credits_used': 0, 'credit_limit_hit': False,
+        'processed': 0, 'cached': 0, 'skipped': 0, 'no_contacts': 0,
+        'errors': 0, 'contacts_found': 0, 'credits_used': 0,
+        'credit_limit_hit': False,
     }
 
     for i, crd in enumerate(crd_list):
+        if crd not in unprocessed:
+            results['cached'] += 1
+            results['credits_used'] = credits_used
+            if progress_callback:
+                progress_callback(i + 1, total, results)
+            continue
+
         if credits_used >= effective_limit:
             results['credit_limit_hit'] = True
             results['credits_used'] = credits_used
@@ -177,6 +278,12 @@ def enrich_contacts_batch(crd_list, credit_limit=None, db_path=None,
         if not firm or not firm.get('website'):
             results['skipped'] += 1
             results['credits_used'] = credits_used
+            # Still mark as processed so we don't retry firms without websites
+            upsert_form_adv(crd, {
+                'cco_name': None, 'cco_email': None, 'cco_phone': None,
+                'state_registrations': None, 'state_count': 0,
+                'aum_breakdown': None,
+            }, db_path=db_path)
             if progress_callback:
                 progress_callback(i + 1, total, results)
             continue
@@ -185,38 +292,48 @@ def enrich_contacts_batch(crd_list, credit_limit=None, db_path=None,
         if not domain:
             results['skipped'] += 1
             results['credits_used'] = credits_used
+            upsert_form_adv(crd, {
+                'cco_name': None, 'cco_email': None, 'cco_phone': None,
+                'state_registrations': None, 'state_count': 0,
+                'aum_breakdown': None,
+            }, db_path=db_path)
             if progress_callback:
                 progress_callback(i + 1, total, results)
             continue
 
-        # Get all contacts for this firm that don't have email yet
-        contacts = get_contacts_for_firm(crd, db_path=db_path)
-        contacts_needing_email = [
-            c for c in contacts
-            if not c.get('contact_email') and c.get('first_name') and c.get('last_name')
-        ]
+        try:
+            contacts = domain_search(domain, crd=crd, db_path=db_path)
+            credits_used += 1
 
-        for contact in contacts_needing_email:
-            if credits_used >= effective_limit:
-                results['credit_limit_hit'] = True
-                break
+            # Clear old contacts and insert new ones
+            delete_contacts_for_firm(crd, db_path=db_path)
+            for contact in contacts:
+                insert_contact(crd, contact, db_path=db_path)
 
-            try:
-                result = enrich_contact_hunter(
-                    contact['id'],
-                    contact['first_name'],
-                    contact['last_name'],
-                    domain, crd,
-                    db_path=db_path,
-                )
-                credits_used += 1
+            # Mark firm as processed
+            cco = next(
+                (c for c in contacts
+                 if c.get('contact_title') and 'compliance' in c['contact_title'].lower()),
+                None,
+            )
+            upsert_form_adv(crd, {
+                'cco_name': cco['contact_name'] if cco else None,
+                'cco_email': cco['contact_email'] if cco else None,
+                'cco_phone': cco.get('contact_phone') if cco else None,
+                'state_registrations': None,
+                'state_count': 0,
+                'aum_breakdown': None,
+            }, db_path=db_path)
 
-                if result and result.get('email'):
-                    results['enriched'] += 1
-                else:
-                    results['no_result'] += 1
-            except Exception:
-                results['errors'] += 1
+            if contacts:
+                results['processed'] += 1
+                results['contacts_found'] += len(contacts)
+            else:
+                results['no_contacts'] += 1
+
+        except Exception as e:
+            logger.error('Error researching CRD %s: %s', crd, e)
+            results['errors'] += 1
 
         results['credits_used'] = credits_used
         if progress_callback:
@@ -228,14 +345,33 @@ def enrich_contacts_batch(crd_list, credit_limit=None, db_path=None,
 
 if __name__ == "__main__":
     import sys
+    from tools.cache_db import get_contacts_for_firm
+
     if len(sys.argv) > 1:
         crd = int(sys.argv[1])
+
+        # First check existing contacts
         contacts = get_contacts_for_firm(crd)
         if contacts:
-            print(f"CRD {crd}: {len(contacts)} contacts found")
+            print(f"CRD {crd}: {len(contacts)} contacts in database")
             for c in contacts:
-                print(f"  {c.get('contact_name')} - {c.get('contact_email', 'no email')}")
+                print(f"  {c.get('contact_name')} — {c.get('contact_title', 'N/A')} "
+                      f"— {c.get('contact_email', 'no email')}")
         else:
-            print(f"CRD {crd}: No contacts in database")
+            # Try domain search
+            firm = get_firm_by_crd(crd)
+            if firm and firm.get('website'):
+                domain = _extract_domain(firm['website'])
+                if domain:
+                    print(f"CRD {crd}: Searching Hunter.io for {domain}...")
+                    contacts = domain_search(domain, crd=crd)
+                    print(f"Found {len(contacts)} contacts:")
+                    for c in contacts:
+                        print(f"  {c['contact_name']} — {c.get('contact_title', 'N/A')} "
+                              f"— {c['contact_email']}")
+                else:
+                    print(f"CRD {crd}: No usable website domain")
+            else:
+                print(f"CRD {crd}: Firm not found or no website")
     else:
         print("Usage: python tools/enrich_contacts.py <CRD_NUMBER>")

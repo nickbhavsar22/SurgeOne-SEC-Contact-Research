@@ -21,15 +21,16 @@ The core workflow: identify firms in the 120-day SEC registration approval windo
 | Source | What It Provides | Access |
 |--------|-----------------|--------|
 | **SEC FOIA Data** | Monthly CSV dumps of all registered investment advisers (~448 columns) | `https://www.sec.gov/foia` — public, no auth |
-| **Form ADV PDFs** | Contact names, titles (Principal/Owner, CCO, officers) | `reports.adviserinfo.sec.gov/reports/ADV/{CRD}/PDF/{CRD}.pdf` — public |
-| **Hunter.io** | Email + phone lookup by person name + company domain | API key required, 2,000 credits/month |
+| **Hunter.io** | Contact names, titles, emails, phones via Domain Search | API key required, 2,000 credits/month |
+| **Form ADV PDFs** | Firm-level data (not used for contacts — fields are blank in practice) | `reports.adviserinfo.sec.gov/reports/ADV/{CRD}/PDF/{CRD}.pdf` — public |
 
 ### Target Contacts
 
 - **Chief Compliance Officer (CCO)** — required by SEC, often the managing principal at smaller firms
 - **Principal/Owner** — listed in Form ADV Part 1A
 - **Other officers/directors** — from Schedule A/B of Form ADV
-- Form ADV PDFs contain names and titles but NOT email/phone — Hunter.io fills that gap
+- Hunter.io Domain Search is the primary contact source (names, titles, emails, phones in one call)
+- Form ADV PDFs have blank person-name fields in practice; `parse_form_adv.py` exists but is not used in the primary pipeline
 
 ## Sibling Project Reference
 
@@ -53,9 +54,9 @@ Stage 1: Import SEC Data
   Upload SEC FOIA ZIP/CSV → parse → filter to 120-day approvals → store in DB
 
 Stage 2: Research Firms (user sets batch size)
-  For each firm:
-    1. Download Form ADV PDF → extract ALL contacts (names + titles) via pdfplumber
-    2. For each contact without email → Hunter.io Email Finder (1 credit each)
+  For each firm with a website:
+    1. Hunter.io Domain Search → find ALL people at firm's domain (1 credit per firm)
+    2. Filter generic emails, store contacts in DB
     3. Mark firm as processed (cached for 30 days)
 
 Export: CSV with all contacts joined with firm data
@@ -64,10 +65,10 @@ Export: CSV with all contacts joined with firm data
 ### Key Technical Considerations
 
 - SEC FOIA CSVs use **latin-1 encoding** and contain ~448 columns; only ~17 are relevant
-- Form ADV PDFs contain names/titles but NOT email/phone — Hunter.io fills the gap
+- Hunter.io Domain Search returns names, titles, emails, and phones in one API call per firm
 - Multiple contacts per firm (not just the "best" one)
 - Hunter.io paid plan: 2,000 credits/month — per-batch credit limit configurable in UI
-- Rate limiting: 1 req/sec for SEC PDF downloads
+- Social media URLs (LinkedIn, Facebook, etc.) are skipped for domain search
 - Caching: firms processed within 30 days are automatically skipped
 
 ## Commands

@@ -29,37 +29,34 @@ Monthly, after SEC publishes new FOIA data (typically 1st-2nd of each month).
 - Empty or malformed AUM values -> `_safe_int()` handles gracefully
 - SEC FOIA URLs may return 403 -> user uploads local file as primary method
 
-### Stage 2: Research Firms (PDF Extraction + Hunter.io)
-**Tools:** `tools/parse_form_adv.py`, `tools/enrich_contacts.py`
+### Stage 2: Research Firms (Hunter.io Domain Search)
+
+**Tool:** `tools/enrich_contacts.py`
 **Input:** CRD numbers from Stage 1, user-selected batch size
-**Output:** All contacts in `contacts` table, enriched with email/phone
+**Output:** All contacts in `contacts` table with names, titles, emails, phones
 
-**Step 2a - Form ADV PDF Extraction** (`parse_form_adv.py`):
-1. Downloads Form ADV PDF from `reports.adviserinfo.sec.gov/reports/ADV/{CRD}/PDF/{CRD}.pdf`
-2. Extracts text from first 15 pages using pdfplumber
-3. Applies regex patterns to find ALL contacts:
-   - Pattern 1: Principal/Owner (after "your last, first, and middle names")
-   - Pattern 2: Chief Compliance Officer (Section J)
-   - Pattern 3: Other officers/directors (Schedule A items with Name: + Title:)
-4. Extracts all non-generic emails from PDF text
-5. Stores all contacts in `contacts` table (multiple per firm)
-6. Marks firm as processed in `form_adv_details`
-7. Rate-limited to 1 request/second
+Uses Hunter.io Domain Search API to find all people at each firm's website domain
+in a single call. Each call uses 1 Hunter.io credit and returns names, titles,
+emails, and phone numbers.
 
-**Step 2b - Hunter.io Email Enrichment** (`enrich_contacts.py`):
-1. For each contact without an email, calls Hunter.io Email Finder
-2. Uses contact's first_name + last_name + firm website domain
-3. Accepts emails with score > 30, rejects generic emails
-4. Updates contact record with email and phone
-5. Each lookup uses 1 Hunter.io credit
-6. Stops at credit limit (default 100, configurable in UI)
+1. For each unprocessed firm with a website:
+   a. Extract domain from firm's website URL
+   b. Skip social media domains (LinkedIn, Facebook, Twitter, etc.)
+   c. Call Hunter.io Domain Search API (`/v2/domain-search`)
+   d. Filter out generic emails (info@, support@, compliance@, etc.)
+   e. Filter out contacts without first/last name
+   f. Store all valid contacts in `contacts` table
+   g. Mark firm as processed in `form_adv_details` (cached for 30 days)
+2. Stops at credit limit (default 100, configurable in UI)
 
 **Edge cases:**
-- Hunter.io paid plan: 2,000 credits/month - monitor via sidebar
+
+- Hunter.io paid plan: 2,000 credits/month — monitor via sidebar
 - Per-batch credit limit prevents runaway credit usage
 - Caching: firms processed within 30 days are skipped automatically
 - Generic emails (info@, support@, compliance@, etc.) are filtered
-- Contacts without first/last name are skipped for Hunter.io lookup
+- Social media URLs (linkedin.com, facebook.com, etc.) are skipped
+- Firms without a website URL are skipped and marked processed
 
 ### Stage 3: Export
 **Via:** Dashboard export button
@@ -79,14 +76,12 @@ streamlit run app.py
 4. Download CSV from the Contact List section
 
 ### Via CLI (individual tools)
+
 ```bash
 # Stage 1
 python tools/fetch_sec_data.py
 
-# Stage 2a - PDF extraction (single firm)
-python tools/parse_form_adv.py 123456
-
-# Stage 2b - Hunter.io enrichment (single firm)
+# Stage 2 - Hunter.io Domain Search (single firm)
 python tools/enrich_contacts.py 123456
 ```
 
@@ -102,8 +97,9 @@ All data persists in `surge_research.db` (SQLite, WAL mode).
 | `export_history` | Record of CSV exports |
 
 ## Known Limitations
+
 - SEC FOIA download URLs may return 403; user upload is the reliable method
-- Form ADV PDFs contain names/titles but NOT email/phone - Hunter.io needed for those
 - Hunter.io paid plan: 2,000 credits/month; per-batch limit configurable
-- PDF extraction depends on consistent Form ADV formatting; some firms may have non-standard layouts
-- Contact name extraction uses heuristic validation; some valid names may be rejected if they contain common business words
+- Hunter.io Domain Search only works for firms with a real website domain (not LinkedIn/social media URLs)
+- ~60% of firms yield contacts via Domain Search; firms without web presence return nothing
+- Form ADV PDFs have blank person-name fields in practice; PDF extraction (`parse_form_adv.py`) exists but is not used in the primary pipeline

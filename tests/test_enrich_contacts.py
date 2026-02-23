@@ -1,10 +1,10 @@
-"""Tests for enrich_contacts.py — Hunter.io Email Finder enrichment."""
+"""Tests for enrich_contacts.py — Hunter.io Domain Search + Email Finder."""
 
 from unittest.mock import patch, MagicMock
 import pytest
 
 from tools.enrich_contacts import (
-    enrich_contact_hunter, enrich_contacts_batch,
+    domain_search, enrich_contact_hunter, research_firms_batch,
     _extract_domain, _is_generic_email,
 )
 from tools.cache_db import upsert_firms, upsert_form_adv, insert_contact
@@ -28,6 +28,18 @@ class TestExtractDomain:
 
     def test_empty(self):
         assert _extract_domain('') is None
+
+    def test_linkedin_returns_none(self):
+        assert _extract_domain('https://www.linkedin.com/in/someone') is None
+
+    def test_facebook_returns_none(self):
+        assert _extract_domain('https://facebook.com/company') is None
+
+    def test_twitter_returns_none(self):
+        assert _extract_domain('https://twitter.com/company') is None
+
+    def test_x_returns_none(self):
+        assert _extract_domain('https://x.com/company') is None
 
 
 class TestIsGenericEmail:
@@ -55,6 +67,115 @@ class TestIsGenericEmail:
         assert _is_generic_email('operations@advisory.com') is True
 
 
+class TestDomainSearch:
+    @patch('tools.enrich_contacts.HUNTER_API_KEY', 'test_key')
+    @patch('tools.enrich_contacts.requests.get')
+    def test_returns_contacts(self, mock_get, tmp_db, sample_firm):
+        upsert_firms([sample_firm], db_path=tmp_db)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            'data': {
+                'domain': 'testwm.com',
+                'emails': [
+                    {
+                        'value': 'jane.doe@testwm.com',
+                        'first_name': 'Jane',
+                        'last_name': 'Doe',
+                        'position': 'Chief Compliance Officer',
+                        'confidence': 90,
+                        'phone_number': '212-555-1234',
+                    },
+                    {
+                        'value': 'john.smith@testwm.com',
+                        'first_name': 'John',
+                        'last_name': 'Smith',
+                        'position': 'Managing Partner',
+                        'confidence': 85,
+                        'phone_number': None,
+                    },
+                ]
+            }
+        }
+        mock_get.return_value = mock_resp
+
+        contacts = domain_search('testwm.com', crd=sample_firm['crd'],
+                                 db_path=tmp_db)
+        assert len(contacts) == 2
+        assert contacts[0]['contact_name'] == 'Jane Doe'
+        assert contacts[0]['contact_email'] == 'jane.doe@testwm.com'
+        assert contacts[0]['contact_title'] == 'Chief Compliance Officer'
+        assert contacts[0]['contact_phone'] == '212-555-1234'
+        assert contacts[0]['source'] == 'hunter_domain_search'
+        assert contacts[1]['contact_name'] == 'John Smith'
+
+    @patch('tools.enrich_contacts.HUNTER_API_KEY', 'test_key')
+    @patch('tools.enrich_contacts.requests.get')
+    def test_filters_generic_emails(self, mock_get, tmp_db, sample_firm):
+        upsert_firms([sample_firm], db_path=tmp_db)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            'data': {
+                'domain': 'testwm.com',
+                'emails': [
+                    {
+                        'value': 'info@testwm.com',
+                        'first_name': None,
+                        'last_name': None,
+                        'position': None,
+                        'confidence': 90,
+                    },
+                    {
+                        'value': 'jane@testwm.com',
+                        'first_name': 'Jane',
+                        'last_name': 'Doe',
+                        'position': 'CEO',
+                        'confidence': 85,
+                    },
+                ]
+            }
+        }
+        mock_get.return_value = mock_resp
+
+        contacts = domain_search('testwm.com', crd=sample_firm['crd'],
+                                 db_path=tmp_db)
+        # info@ should be filtered, null name should be filtered
+        assert len(contacts) == 1
+        assert contacts[0]['contact_email'] == 'jane@testwm.com'
+
+    @patch('tools.enrich_contacts.HUNTER_API_KEY', 'test_key')
+    @patch('tools.enrich_contacts.requests.get')
+    def test_returns_empty_on_no_results(self, mock_get, tmp_db, sample_firm):
+        upsert_firms([sample_firm], db_path=tmp_db)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            'data': {'domain': 'unknown.com', 'emails': []}
+        }
+        mock_get.return_value = mock_resp
+
+        contacts = domain_search('unknown.com', crd=sample_firm['crd'],
+                                 db_path=tmp_db)
+        assert contacts == []
+
+    @patch('tools.enrich_contacts.HUNTER_API_KEY', '')
+    def test_returns_empty_without_api_key(self, tmp_db):
+        contacts = domain_search('testwm.com', db_path=tmp_db)
+        assert contacts == []
+
+    @patch('tools.enrich_contacts.HUNTER_API_KEY', 'test_key')
+    @patch('tools.enrich_contacts.requests.get')
+    def test_handles_network_error(self, mock_get, tmp_db, sample_firm):
+        upsert_firms([sample_firm], db_path=tmp_db)
+        import requests as req
+        mock_get.side_effect = req.RequestException("timeout")
+
+        contacts = domain_search('testwm.com', crd=sample_firm['crd'],
+                                 db_path=tmp_db)
+        assert contacts == []
+
+
 class TestEnrichContactHunter:
     @patch('tools.enrich_contacts.HUNTER_API_KEY', 'test_key')
     @patch('tools.enrich_contacts.requests.get')
@@ -63,7 +184,7 @@ class TestEnrichContactHunter:
         contact_id = insert_contact(sample_firm['crd'], {
             'contact_name': 'Jane Doe',
             'contact_title': 'CCO',
-            'source': 'pdf_cco',
+            'source': 'hunter_domain_search',
         }, db_path=tmp_db)
 
         mock_resp = MagicMock()
@@ -90,7 +211,7 @@ class TestEnrichContactHunter:
     def test_rejects_low_score(self, mock_get, tmp_db, sample_firm):
         upsert_firms([sample_firm], db_path=tmp_db)
         contact_id = insert_contact(sample_firm['crd'], {
-            'contact_name': 'Jane Doe', 'source': 'pdf',
+            'contact_name': 'Jane Doe', 'source': 'hunter_domain_search',
         }, db_path=tmp_db)
 
         mock_resp = MagicMock()
@@ -111,7 +232,7 @@ class TestEnrichContactHunter:
     def test_rejects_generic_email(self, mock_get, tmp_db, sample_firm):
         upsert_firms([sample_firm], db_path=tmp_db)
         contact_id = insert_contact(sample_firm['crd'], {
-            'contact_name': 'Jane Doe', 'source': 'pdf',
+            'contact_name': 'Jane Doe', 'source': 'hunter_domain_search',
         }, db_path=tmp_db)
 
         mock_resp = MagicMock()
@@ -147,7 +268,7 @@ class TestEnrichContactHunter:
     def test_handles_network_error(self, mock_get, tmp_db, sample_firm):
         upsert_firms([sample_firm], db_path=tmp_db)
         contact_id = insert_contact(sample_firm['crd'], {
-            'contact_name': 'Jane Doe', 'source': 'pdf',
+            'contact_name': 'Jane Doe', 'source': 'hunter_domain_search',
         }, db_path=tmp_db)
 
         import requests as req
@@ -160,79 +281,95 @@ class TestEnrichContactHunter:
         assert result is None
 
 
-class TestEnrichContactsBatch:
+class TestResearchFirmsBatch:
     @patch('tools.enrich_contacts.HUNTER_API_KEY', '')
     def test_returns_no_api_key(self, tmp_db, sample_firm):
         upsert_firms([sample_firm], db_path=tmp_db)
-        result = enrich_contacts_batch(
+        result = research_firms_batch(
             [sample_firm['crd']], db_path=tmp_db,
         )
         assert result['no_api_key'] is True
 
     @patch('tools.enrich_contacts.HUNTER_API_KEY', 'test_key')
-    @patch('tools.enrich_contacts.enrich_contact_hunter')
-    def test_enriches_contacts_without_email(self, mock_hunter, tmp_db,
-                                              sample_firm):
+    @patch('tools.enrich_contacts.domain_search')
+    def test_stores_contacts(self, mock_search, tmp_db, sample_firm):
         upsert_firms([sample_firm], db_path=tmp_db)
-        insert_contact(sample_firm['crd'], {
-            'contact_name': 'Jane Doe',
-            'contact_title': 'CCO',
-            'source': 'pdf_cco',
-        }, db_path=tmp_db)
 
-        mock_hunter.return_value = {'email': 'jane@testwm.com', 'phone': None}
+        mock_search.return_value = [
+            {
+                'contact_name': 'Jane Doe',
+                'first_name': 'Jane',
+                'last_name': 'Doe',
+                'contact_title': 'CCO',
+                'contact_email': 'jane@testwm.com',
+                'contact_phone': None,
+                'confidence': 90,
+                'source': 'hunter_domain_search',
+            },
+        ]
 
-        result = enrich_contacts_batch(
+        result = research_firms_batch(
             [sample_firm['crd']], db_path=tmp_db,
         )
-        assert result['enriched'] == 1
+        assert result['processed'] == 1
+        assert result['contacts_found'] == 1
+        assert result['credits_used'] == 1
 
     @patch('tools.enrich_contacts.HUNTER_API_KEY', 'test_key')
-    @patch('tools.enrich_contacts.enrich_contact_hunter')
-    def test_skips_contacts_with_email(self, mock_hunter, tmp_db, sample_firm):
-        upsert_firms([sample_firm], db_path=tmp_db)
-        insert_contact(sample_firm['crd'], {
-            'contact_name': 'Jane Doe',
-            'contact_email': 'already@testwm.com',
-            'source': 'pdf_cco',
-        }, db_path=tmp_db)
-
-        result = enrich_contacts_batch(
-            [sample_firm['crd']], db_path=tmp_db,
-        )
-        mock_hunter.assert_not_called()
-
-    @patch('tools.enrich_contacts.HUNTER_API_KEY', 'test_key')
-    @patch('tools.enrich_contacts.enrich_contact_hunter')
-    def test_skips_firms_without_website(self, mock_hunter, tmp_db):
+    @patch('tools.enrich_contacts.domain_search')
+    def test_skips_firms_without_website(self, mock_search, tmp_db):
         firm_no_website = {
             'crd': 999003, 'company': 'No Website LLC',
             'status': '120-Day Approval', 'track': 'A',
         }
         upsert_firms([firm_no_website], db_path=tmp_db)
-        insert_contact(999003, {
-            'contact_name': 'Jane Doe', 'source': 'pdf',
-        }, db_path=tmp_db)
 
-        result = enrich_contacts_batch([999003], db_path=tmp_db)
+        result = research_firms_batch([999003], db_path=tmp_db)
         assert result['skipped'] == 1
-        mock_hunter.assert_not_called()
+        mock_search.assert_not_called()
 
     @patch('tools.enrich_contacts.HUNTER_API_KEY', 'test_key')
-    @patch('tools.enrich_contacts.enrich_contact_hunter')
-    def test_credit_limit(self, mock_hunter, tmp_db, sample_firm,
+    @patch('tools.enrich_contacts.domain_search')
+    def test_skips_linkedin_domains(self, mock_search, tmp_db):
+        firm_linkedin = {
+            'crd': 999004, 'company': 'LinkedIn Firm',
+            'website': 'https://www.linkedin.com/company/test',
+            'status': '120-Day Approval', 'track': 'A',
+        }
+        upsert_firms([firm_linkedin], db_path=tmp_db)
+
+        result = research_firms_batch([999004], db_path=tmp_db)
+        assert result['skipped'] == 1
+        mock_search.assert_not_called()
+
+    @patch('tools.enrich_contacts.HUNTER_API_KEY', 'test_key')
+    @patch('tools.enrich_contacts.domain_search')
+    def test_skips_cached(self, mock_search, tmp_db, sample_firm,
+                           sample_form_adv):
+        upsert_firms([sample_firm], db_path=tmp_db)
+        # Mark as recently processed
+        upsert_form_adv(sample_firm['crd'], sample_form_adv, db_path=tmp_db)
+
+        result = research_firms_batch(
+            [sample_firm['crd']], db_path=tmp_db,
+        )
+        assert result['cached'] == 1
+        mock_search.assert_not_called()
+
+    @patch('tools.enrich_contacts.HUNTER_API_KEY', 'test_key')
+    @patch('tools.enrich_contacts.domain_search')
+    def test_credit_limit(self, mock_search, tmp_db, sample_firm,
                            sample_firm_120day):
         upsert_firms([sample_firm, sample_firm_120day], db_path=tmp_db)
-        insert_contact(sample_firm['crd'], {
-            'contact_name': 'Jane Doe', 'source': 'pdf',
-        }, db_path=tmp_db)
-        insert_contact(sample_firm_120day['crd'], {
-            'contact_name': 'Bob Smith', 'source': 'pdf',
-        }, db_path=tmp_db)
+        mock_search.return_value = [
+            {
+                'contact_name': 'Jane Doe', 'first_name': 'Jane',
+                'last_name': 'Doe', 'contact_email': 'jane@test.com',
+                'source': 'hunter_domain_search', 'confidence': 90,
+            },
+        ]
 
-        mock_hunter.return_value = {'email': 'jane@test.com', 'phone': None}
-
-        result = enrich_contacts_batch(
+        result = research_firms_batch(
             [sample_firm['crd'], sample_firm_120day['crd']],
             credit_limit=1, db_path=tmp_db,
         )
@@ -240,23 +377,17 @@ class TestEnrichContactsBatch:
         assert result['credit_limit_hit'] is True
 
     @patch('tools.enrich_contacts.HUNTER_API_KEY', 'test_key')
-    @patch('tools.enrich_contacts.enrich_contact_hunter')
-    def test_progress_callback(self, mock_hunter, tmp_db, sample_firm,
+    @patch('tools.enrich_contacts.domain_search')
+    def test_progress_callback(self, mock_search, tmp_db, sample_firm,
                                 sample_firm_120day):
         upsert_firms([sample_firm, sample_firm_120day], db_path=tmp_db)
-        insert_contact(sample_firm['crd'], {
-            'contact_name': 'Jane Doe', 'source': 'pdf',
-        }, db_path=tmp_db)
-        insert_contact(sample_firm_120day['crd'], {
-            'contact_name': 'Bob Smith', 'source': 'pdf',
-        }, db_path=tmp_db)
-        mock_hunter.return_value = None
+        mock_search.return_value = []
 
         calls = []
         def on_progress(current, total, results):
             calls.append((current, total))
 
-        enrich_contacts_batch(
+        research_firms_batch(
             [sample_firm['crd'], sample_firm_120day['crd']],
             db_path=tmp_db, progress_callback=on_progress,
         )
