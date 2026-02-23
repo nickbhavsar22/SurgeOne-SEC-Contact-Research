@@ -23,9 +23,15 @@ from tools.cache_db import (
     get_monthly_hunter_credits, get_unprocessed_crds,
 )
 from tools.fetch_sec_data import fetch_and_store, probe_sec_urls
-from tools.enrich_contacts import (
-    research_firms_batch, HUNTER_API_KEY, DEFAULT_BATCH_CREDIT_LIMIT,
-)
+try:
+    from tools.enrich_contacts import (
+        research_firms_batch, HUNTER_API_KEY, DEFAULT_BATCH_CREDIT_LIMIT,
+    )
+except ImportError as e:
+    import traceback
+    st.error(f"Failed to import enrich_contacts: {e}")
+    st.code(traceback.format_exc())
+    st.stop()
 
 APP_VERSION = "0.5.2"
 LOGO_PATH = Path(__file__).parent / "assets" / "logo.png"
