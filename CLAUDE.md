@@ -127,3 +127,4 @@ This project should pass the standard codebase audit (`../app-audit.md.txt`). Ke
 - Clean `.gitignore` (`.env`, `__pycache__`, `.tmp/`, OS files)
 - Clear setup instructions for fresh clone
 - Build/run scripts documented
+- **Auto-push:** After every commit in this project, always push to GitHub (`git push`). Streamlit Cloud auto-redeploys from the repo.
