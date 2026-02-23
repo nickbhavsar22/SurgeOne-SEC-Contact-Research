@@ -15,14 +15,16 @@ import os
 import logging
 
 import requests
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 from tools.cache_db import (
     init_db, get_firm_by_crd, insert_contact, delete_contacts_for_firm,
     get_unprocessed_crds, upsert_form_adv, log_enrichment,
 )
-
-load_dotenv()
 
 # Bridge Streamlit Cloud secrets into env vars for os.getenv() compatibility
 try:

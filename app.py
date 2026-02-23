@@ -27,7 +27,7 @@ from tools.enrich_contacts import (
     research_firms_batch, HUNTER_API_KEY, DEFAULT_BATCH_CREDIT_LIMIT,
 )
 
-APP_VERSION = "0.5.1"
+APP_VERSION = "0.5.2"
 LOGO_PATH = Path(__file__).parent / "assets" / "logo.png"
 
 # --- Page Config ---
