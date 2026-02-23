@@ -26,7 +26,7 @@ from tools.enrich_contacts import enrich_batch, HUNTER_API_KEY, DEFAULT_BATCH_CR
 from tools.parse_form_adv import extract_cco_batch
 from tools.validate_contacts import validate_batch
 
-APP_VERSION = "0.3.1"
+APP_VERSION = "0.4.0"
 LOGO_PATH = Path(__file__).parent / "assets" / "logo.png"
 
 # --- Page Config ---

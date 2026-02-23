@@ -128,3 +128,4 @@ This project should pass the standard codebase audit (`../app-audit.md.txt`). Ke
 - Clear setup instructions for fresh clone
 - Build/run scripts documented
 - **Auto-push:** After every commit in this project, always push to GitHub (`git push`). Streamlit Cloud auto-redeploys from the repo.
+- **Version bumping:** On every commit that changes app behavior or UI, bump `APP_VERSION` in `app.py` (line ~29). Use semver: patch for fixes, minor for features/UI changes, major for breaking changes.
