@@ -38,8 +38,171 @@ st.set_page_config(
 )
 
 
+def _inject_custom_css():
+    """Inject custom CSS for Stakent-inspired dark theme."""
+    st.markdown("""
+    <style>
+    /* --- Inter font --- */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    html, body, [class*="css"] {
+        font-family: 'Inter', sans-serif;
+    }
+
+    /* --- Metric cards --- */
+    [data-testid="stMetric"] {
+        background: #181820;
+        border: 1px solid #2A2A35;
+        border-radius: 12px;
+        padding: 0.8rem 1rem;
+        transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    }
+    [data-testid="stMetric"]:hover {
+        border-color: #7C5CFC;
+        box-shadow: 0 0 12px rgba(124, 92, 252, 0.12);
+    }
+    [data-testid="stMetric"] [data-testid="stMetricValue"] {
+        font-weight: 600;
+        font-size: 1.4rem;
+    }
+    [data-testid="stMetric"] [data-testid="stMetricLabel"] {
+        color: #8B8B9E;
+        font-size: 0.78rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+    }
+
+    /* --- Primary buttons --- */
+    button[kind="primary"] {
+        background: #7C5CFC !important;
+        border: none !important;
+        border-radius: 8px !important;
+        font-weight: 600 !important;
+        transition: background 0.2s ease, box-shadow 0.2s ease !important;
+    }
+    button[kind="primary"]:hover {
+        background: #9B7FFF !important;
+        box-shadow: 0 0 16px rgba(124, 92, 252, 0.3) !important;
+    }
+    button[kind="secondary"] {
+        border: 1px solid #2A2A35 !important;
+        border-radius: 8px !important;
+        background: transparent !important;
+        transition: border-color 0.2s ease !important;
+    }
+    button[kind="secondary"]:hover {
+        border-color: #7C5CFC !important;
+    }
+
+    /* --- Progress bars --- */
+    .stProgress > div > div > div {
+        background: linear-gradient(90deg, #7C5CFC, #9B7FFF) !important;
+        border-radius: 8px !important;
+    }
+    .stProgress > div > div {
+        background: #2A2A35 !important;
+        border-radius: 8px !important;
+    }
+
+    /* --- Sidebar --- */
+    section[data-testid="stSidebar"] {
+        background: #131318 !important;
+        border-right: 1px solid #2A2A35 !important;
+    }
+    section[data-testid="stSidebar"] [data-testid="stRadio"] label {
+        padding: 0.4rem 0;
+        transition: color 0.15s ease;
+    }
+
+    /* --- Expanders --- */
+    [data-testid="stExpander"] {
+        background: #181820;
+        border: 1px solid #2A2A35;
+        border-radius: 12px;
+        overflow: hidden;
+    }
+    [data-testid="stExpander"] summary:hover {
+        color: #F0F0F0;
+    }
+
+    /* --- Alert boxes --- */
+    .stAlert > div {
+        border-radius: 10px !important;
+        border-left-width: 4px !important;
+    }
+    div[data-testid="stAlert"][data-baseweb*="info"] > div,
+    .stAlert > div[role="alert"]:has(.st-emotion-cache-info) {
+        background: rgba(124, 92, 252, 0.08) !important;
+        border-left-color: #7C5CFC !important;
+    }
+
+    /* --- Dividers --- */
+    hr {
+        border-color: #2A2A35 !important;
+        opacity: 0.6;
+    }
+
+    /* --- Selectboxes & inputs --- */
+    [data-testid="stSelectbox"] > div > div,
+    [data-testid="stNumberInput"] > div > div > input,
+    [data-testid="stTextInput"] > div > div > input {
+        border: 1px solid #2A2A35 !important;
+        border-radius: 8px !important;
+        background: #181820 !important;
+    }
+    [data-testid="stSelectbox"] > div > div:focus-within,
+    [data-testid="stTextInput"] > div > div:focus-within {
+        border-color: #7C5CFC !important;
+        box-shadow: 0 0 0 1px #7C5CFC !important;
+    }
+
+    /* --- File uploader --- */
+    [data-testid="stFileUploader"] > div {
+        border: 1px dashed #2A2A35 !important;
+        border-radius: 12px !important;
+        background: #181820 !important;
+    }
+    [data-testid="stFileUploader"] > div:hover {
+        border-color: #7C5CFC !important;
+    }
+
+    /* --- Dataframes --- */
+    [data-testid="stDataFrame"] {
+        border: 1px solid #2A2A35 !important;
+        border-radius: 12px !important;
+        overflow: hidden;
+    }
+
+    /* --- Slider thumb --- */
+    [data-testid="stSlider"] [role="slider"] {
+        background: #7C5CFC !important;
+    }
+
+    /* --- Download button --- */
+    [data-testid="stDownloadButton"] button {
+        background: #7C5CFC !important;
+        border-radius: 8px !important;
+        font-weight: 600 !important;
+    }
+    [data-testid="stDownloadButton"] button:hover {
+        background: #9B7FFF !important;
+        box-shadow: 0 0 16px rgba(124, 92, 252, 0.3) !important;
+    }
+
+    /* --- Subheader spacing --- */
+    h2 {
+        margin-top: 0.5rem !important;
+        font-weight: 600 !important;
+    }
+    h3 {
+        font-weight: 600 !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+
 def main():
     init_db()
+    _inject_custom_css()
     stats = get_pipeline_stage_stats()
 
     # --- Sidebar ---
