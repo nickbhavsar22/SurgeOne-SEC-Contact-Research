@@ -77,6 +77,7 @@ def init_db(db_path=None):
                 contact_email   TEXT,
                 contact_title   TEXT,
                 contact_phone   TEXT,
+                contact_type    TEXT,
                 contact_linkedin TEXT,
                 source          TEXT,
                 confidence      REAL,
@@ -112,8 +113,8 @@ def init_db(db_path=None):
             CREATE INDEX IF NOT EXISTS idx_contacts_crd ON contacts(crd);
             CREATE INDEX IF NOT EXISTS idx_enrichment_log_crd ON enrichment_log(crd);
         """)
-        # Migration: add first_name/last_name columns if not present
-        for col in ('first_name', 'last_name'):
+        # Migration: add columns if not present
+        for col in ('first_name', 'last_name', 'contact_type'):
             try:
                 conn.execute(f"ALTER TABLE contacts ADD COLUMN {col} TEXT")
             except sqlite3.OperationalError:
@@ -355,14 +356,15 @@ def insert_contact(crd, contact, db_path=None):
         last_name = contact.get('last_name') or parsed_last
         conn.execute("""
             INSERT INTO contacts (crd, contact_name, first_name, last_name,
-                contact_email, contact_title, contact_phone, contact_linkedin,
-                source, confidence, enriched_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                contact_email, contact_title, contact_phone, contact_type,
+                contact_linkedin, source, confidence, enriched_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             crd, contact.get('contact_name'), first_name, last_name,
             contact.get('contact_email'), contact.get('contact_title'),
-            contact.get('contact_phone'), contact.get('contact_linkedin'),
-            contact.get('source'), contact.get('confidence', 0), now,
+            contact.get('contact_phone'), contact.get('contact_type'),
+            contact.get('contact_linkedin'), contact.get('source'),
+            contact.get('confidence', 0), now,
         ))
         conn.commit()
         return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -391,7 +393,7 @@ def get_all_contacts_with_firms(db_path=None):
             SELECT c.id, c.crd, f.company, f.state, f.website, f.aum,
                    c.contact_name, c.first_name, c.last_name,
                    c.contact_email, c.contact_title, c.contact_phone,
-                   c.source, c.confidence, c.enriched_at
+                   c.contact_type, c.source, c.confidence, c.enriched_at
             FROM contacts c
             JOIN firms f ON c.crd = f.crd
             ORDER BY f.company, c.contact_title

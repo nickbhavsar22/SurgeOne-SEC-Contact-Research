@@ -6,8 +6,11 @@ import pytest
 from tools.enrich_contacts import (
     domain_search, enrich_contact_hunter, research_firms_batch,
     _extract_domain, _is_generic_email,
+    _classify_contact, _filter_contacts_by_relevance,
 )
-from tools.cache_db import upsert_firms, upsert_form_adv, insert_contact
+from tools.cache_db import (
+    upsert_firms, upsert_form_adv, insert_contact, get_contacts_for_firm,
+)
 
 
 class TestExtractDomain:
@@ -65,6 +68,121 @@ class TestIsGenericEmail:
 
     def test_operations_is_generic(self):
         assert _is_generic_email('operations@advisory.com') is True
+
+
+class TestClassifyContact:
+    def test_cco_is_compliance(self):
+        assert _classify_contact({'contact_title': 'Chief Compliance Officer'}) == 'compliance'
+
+    def test_compliance_analyst_is_compliance(self):
+        assert _classify_contact({'contact_title': 'Compliance Analyst'}) == 'compliance'
+
+    def test_cco_abbreviation(self):
+        assert _classify_contact({'contact_title': 'CCO'}) == 'compliance'
+
+    def test_compound_compliance_title(self):
+        assert _classify_contact({'contact_title': 'Managing Principal / CCO'}) == 'compliance'
+
+    def test_ceo_is_c_suite(self):
+        assert _classify_contact({'contact_title': 'Chief Executive Officer'}) == 'c_suite'
+
+    def test_cfo_is_c_suite(self):
+        assert _classify_contact({'contact_title': 'CFO'}) == 'c_suite'
+
+    def test_managing_partner_is_c_suite(self):
+        assert _classify_contact({'contact_title': 'Managing Partner'}) == 'c_suite'
+
+    def test_president_is_c_suite(self):
+        assert _classify_contact({'contact_title': 'President'}) == 'c_suite'
+
+    def test_general_counsel_is_legal(self):
+        assert _classify_contact({'contact_title': 'General Counsel'}) == 'legal_regulatory'
+
+    def test_risk_officer_is_legal(self):
+        assert _classify_contact({'contact_title': 'Chief Risk Officer'}) == 'legal_regulatory'
+
+    def test_regulatory_is_legal(self):
+        assert _classify_contact({'contact_title': 'VP Regulatory Affairs'}) == 'legal_regulatory'
+
+    def test_none_title(self):
+        assert _classify_contact({'contact_title': None}) is None
+
+    def test_empty_title(self):
+        assert _classify_contact({'contact_title': ''}) is None
+
+    def test_irrelevant_title(self):
+        assert _classify_contact({'contact_title': 'Marketing Coordinator'}) is None
+
+    def test_case_insensitive(self):
+        assert _classify_contact({'contact_title': 'CHIEF COMPLIANCE OFFICER'}) == 'compliance'
+
+    def test_compliance_beats_legal(self):
+        """Title with both compliance and legal → classified as compliance."""
+        c = {'contact_title': 'Chief Compliance Officer & General Counsel'}
+        assert _classify_contact(c) == 'compliance'
+
+
+class TestFilterContactsByRelevance:
+    def test_keeps_only_relevant(self):
+        contacts = [
+            {'contact_name': 'Jane', 'contact_title': 'CCO', 'confidence': 90},
+            {'contact_name': 'Bob', 'contact_title': 'Marketing Manager', 'confidence': 85},
+        ]
+        result = _filter_contacts_by_relevance(contacts)
+        assert len(result) == 1
+        assert result[0]['contact_name'] == 'Jane'
+        assert result[0]['contact_type'] == 'compliance'
+
+    def test_keeps_multiple_relevant(self):
+        contacts = [
+            {'contact_name': 'Jane', 'contact_title': 'CCO', 'confidence': 90},
+            {'contact_name': 'Bob', 'contact_title': 'CEO', 'confidence': 85},
+            {'contact_name': 'Eve', 'contact_title': 'Intern', 'confidence': 70},
+        ]
+        result = _filter_contacts_by_relevance(contacts)
+        assert len(result) == 2
+        types = {c['contact_type'] for c in result}
+        assert types == {'compliance', 'c_suite'}
+
+    def test_fallback_to_seniority(self):
+        contacts = [
+            {'contact_name': 'Jane', 'contact_title': 'Founder', 'confidence': 80},
+            {'contact_name': 'Bob', 'contact_title': 'Analyst', 'confidence': 90},
+        ]
+        result = _filter_contacts_by_relevance(contacts)
+        assert len(result) == 1
+        assert result[0]['contact_name'] == 'Jane'
+        assert result[0]['contact_type'] == 'fallback'
+
+    def test_fallback_to_highest_confidence(self):
+        contacts = [
+            {'contact_name': 'Jane', 'contact_title': 'Analyst', 'confidence': 60},
+            {'contact_name': 'Bob', 'contact_title': 'Associate', 'confidence': 90},
+        ]
+        result = _filter_contacts_by_relevance(contacts)
+        assert len(result) == 1
+        assert result[0]['contact_name'] == 'Bob'
+        assert result[0]['contact_type'] == 'fallback'
+
+    def test_fallback_no_titles(self):
+        contacts = [
+            {'contact_name': 'Jane', 'contact_title': None, 'confidence': 80},
+            {'contact_name': 'Bob', 'contact_title': None, 'confidence': 95},
+        ]
+        result = _filter_contacts_by_relevance(contacts)
+        assert len(result) == 1
+        assert result[0]['contact_name'] == 'Bob'
+
+    def test_empty_list(self):
+        assert _filter_contacts_by_relevance([]) == []
+
+    def test_does_not_tag_excluded(self):
+        contacts = [
+            {'contact_name': 'Jane', 'contact_title': 'CCO', 'confidence': 90},
+            {'contact_name': 'Bob', 'contact_title': 'Intern', 'confidence': 70},
+        ]
+        _filter_contacts_by_relevance(contacts)
+        assert 'contact_type' not in contacts[1]
 
 
 class TestDomainSearch:
@@ -349,6 +467,39 @@ class TestResearchFirmsBatch:
         assert result['processed'] == 1
         assert result['contacts_found'] == 1
         assert result['credits_used'] == 1
+
+        # Verify contact_type was set
+        contacts = get_contacts_for_firm(sample_firm['crd'], db_path=tmp_db)
+        assert contacts[0]['contact_type'] == 'compliance'
+
+    @patch('tools.enrich_contacts.HUNTER_API_KEY', 'test_key')
+    @patch('tools.enrich_contacts.domain_search')
+    def test_filters_irrelevant_contacts(self, mock_search, tmp_db, sample_firm):
+        upsert_firms([sample_firm], db_path=tmp_db)
+
+        mock_search.return_value = [
+            {
+                'contact_name': 'Jane Doe', 'first_name': 'Jane',
+                'last_name': 'Doe', 'contact_title': 'CCO',
+                'contact_email': 'jane@testwm.com', 'confidence': 90,
+                'source': 'hunter_domain_search',
+            },
+            {
+                'contact_name': 'Bob Intern', 'first_name': 'Bob',
+                'last_name': 'Intern', 'contact_title': 'Associate',
+                'contact_email': 'bob@testwm.com', 'confidence': 50,
+                'source': 'hunter_domain_search',
+            },
+        ]
+
+        result = research_firms_batch(
+            [sample_firm['crd']], db_path=tmp_db,
+        )
+        assert result['total_raw_contacts'] == 2
+        assert result['contacts_found'] == 1  # Only CCO kept
+        contacts = get_contacts_for_firm(sample_firm['crd'], db_path=tmp_db)
+        assert len(contacts) == 1
+        assert contacts[0]['contact_name'] == 'Jane Doe'
 
     @patch('tools.enrich_contacts.HUNTER_API_KEY', 'test_key')
     @patch('tools.enrich_contacts.domain_search')

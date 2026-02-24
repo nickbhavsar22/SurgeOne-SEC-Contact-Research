@@ -190,6 +190,28 @@ class TestMultiContacts:
         contacts = get_contacts_for_firm(sample_firm['crd'], db_path=tmp_db)
         assert contacts[0]['contact_email'] == 'jane@testwm.com'
 
+    def test_insert_contact_with_type(self, tmp_db, sample_firm):
+        upsert_firms([sample_firm], db_path=tmp_db)
+        insert_contact(sample_firm['crd'], {
+            'contact_name': 'Jane Doe',
+            'contact_title': 'CCO',
+            'contact_type': 'compliance',
+            'source': 'hunter_domain_search',
+        }, db_path=tmp_db)
+        contacts = get_contacts_for_firm(sample_firm['crd'], db_path=tmp_db)
+        assert contacts[0]['contact_type'] == 'compliance'
+
+    def test_get_all_contacts_includes_type(self, tmp_db, sample_firm):
+        upsert_firms([sample_firm], db_path=tmp_db)
+        insert_contact(sample_firm['crd'], {
+            'contact_name': 'Jane Doe',
+            'contact_title': 'CCO',
+            'contact_type': 'compliance',
+            'source': 'hunter_domain_search',
+        }, db_path=tmp_db)
+        all_contacts = get_all_contacts_with_firms(db_path=tmp_db)
+        assert all_contacts[0]['contact_type'] == 'compliance'
+
     def test_insert_parses_first_last_name(self, tmp_db, sample_firm):
         upsert_firms([sample_firm], db_path=tmp_db)
         insert_contact(sample_firm['crd'], {

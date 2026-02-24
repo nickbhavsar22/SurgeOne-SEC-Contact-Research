@@ -27,7 +27,7 @@ from tools.enrich_contacts import (
     research_firms_batch, HUNTER_API_KEY, DEFAULT_BATCH_CREDIT_LIMIT,
 )
 
-APP_VERSION = "0.5.3"
+APP_VERSION = "0.6.0"
 LOGO_PATH = Path(__file__).parent / "assets" / "logo.png"
 
 # --- Page Config ---
@@ -474,8 +474,14 @@ def _section_research(stats):
         progress_bar.progress(1.0, text=f"Research complete! ({elapsed:.0f}s)")
         status_text.empty()
 
+        raw = result.get('total_raw_contacts', result['contacts_found'])
+        kept = result['contacts_found']
+        filter_note = (
+            f" (filtered from {raw} total)"
+            if raw > kept else ""
+        )
         st.success(
-            f"Found **{result['contacts_found']}** contacts across "
+            f"Found **{kept}** relevant contacts{filter_note} across "
             f"**{result['processed']}** firms using "
             f"**{result['credits_used']}** credits"
         )
@@ -510,7 +516,7 @@ def _section_contacts_export():
     # Build DataFrame
     df = pd.DataFrame(contacts)
     display_cols = [
-        'crd', 'company', 'contact_name', 'contact_title',
+        'crd', 'company', 'contact_name', 'contact_title', 'contact_type',
         'contact_email', 'contact_phone', 'state', 'aum', 'source',
     ]
     available_cols = [c for c in display_cols if c in df.columns]
@@ -530,6 +536,10 @@ def _section_contacts_export():
             'company': 'Company',
             'contact_name': 'Name',
             'contact_title': 'Title',
+            'contact_type': st.column_config.TextColumn(
+                'Type',
+                help='Contact relevance: compliance, c_suite, legal_regulatory, or fallback',
+            ),
             'contact_email': 'Email',
             'contact_phone': 'Phone',
             'state': 'State',
@@ -543,7 +553,7 @@ def _section_contacts_export():
     export_cols = [
         'crd', 'company', 'state', 'website', 'aum',
         'contact_name', 'first_name', 'last_name',
-        'contact_title', 'contact_email', 'contact_phone',
+        'contact_title', 'contact_type', 'contact_email', 'contact_phone',
         'source', 'confidence',
     ]
     available_export = [c for c in export_cols if c in df.columns]

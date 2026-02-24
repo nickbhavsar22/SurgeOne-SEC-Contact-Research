@@ -12,6 +12,7 @@ Every API call is logged for credit tracking.
 """
 
 import os
+import re
 import logging
 
 import requests
@@ -65,6 +66,20 @@ GENERIC_EMAIL_DOMAINS = {
 
 DEFAULT_BATCH_CREDIT_LIMIT = 100  # Max Hunter.io credits per batch run
 
+# --- Contact relevance classification ---
+COMPLIANCE_KEYWORDS = ['compliance', 'cco', 'chief compliance']
+CSUITE_KEYWORDS = [
+    'ceo', 'coo', 'cfo', 'cto', 'cio',
+    'chief executive', 'chief operating', 'chief financial',
+    'chief technology', 'chief investment',
+    'managing partner', 'president',
+]
+LEGAL_REGULATORY_KEYWORDS = [
+    'general counsel', 'legal counsel', 'regulatory',
+    'risk officer', 'risk manager', 'legal', 'risk',
+]
+FALLBACK_KEYWORDS = ['principal', 'owner', 'managing director', 'founder', 'director']
+
 
 def _is_generic_email(email):
     """Check if an email is generic or from a blocked domain."""
@@ -74,6 +89,75 @@ def _is_generic_email(email):
     if local.lower() in GENERIC_EMAIL_PREFIXES:
         return True
     return False
+
+
+def _match_keyword(keyword, title):
+    """Check if keyword appears in title using word-boundary matching."""
+    return bool(re.search(r'\b' + re.escape(keyword) + r'\b', title))
+
+
+def _classify_contact(contact):
+    """Classify a contact by title relevance for compliance outreach.
+
+    Returns 'compliance', 'c_suite', 'legal_regulatory', or None.
+    Checked in priority order so compliance wins over c_suite over legal.
+    Uses word-boundary matching to avoid false positives (e.g. 'coo' in 'coordinator').
+    """
+    title = (contact.get('contact_title') or '').lower()
+    if not title:
+        return None
+    for kw in COMPLIANCE_KEYWORDS:
+        if _match_keyword(kw, title):
+            return 'compliance'
+    for kw in CSUITE_KEYWORDS:
+        if _match_keyword(kw, title):
+            return 'c_suite'
+    for kw in LEGAL_REGULATORY_KEYWORDS:
+        if _match_keyword(kw, title):
+            return 'legal_regulatory'
+    return None
+
+
+def _filter_contacts_by_relevance(contacts):
+    """Filter contacts to compliance-relevant roles with fallback logic.
+
+    Classifies each contact and keeps only relevant ones. If no contacts
+    match any category, falls back to:
+      1. First contact matching FALLBACK_KEYWORDS (principal, owner, etc.)
+      2. Single highest-confidence contact
+
+    Returns filtered list with 'contact_type' added to each dict.
+    """
+    classified = []
+    unclassified = []
+
+    for contact in contacts:
+        ctype = _classify_contact(contact)
+        if ctype:
+            contact['contact_type'] = ctype
+            classified.append(contact)
+        else:
+            unclassified.append(contact)
+
+    if classified:
+        return classified
+
+    # Fallback: look for seniority keywords
+    for c in unclassified:
+        title = (c.get('contact_title') or '').lower()
+        if title:
+            for kw in FALLBACK_KEYWORDS:
+                if _match_keyword(kw, title):
+                    c['contact_type'] = 'fallback'
+                    return [c]
+
+    # Ultimate fallback: highest confidence contact
+    if unclassified:
+        best = max(unclassified, key=lambda c: c.get('confidence', 0))
+        best['contact_type'] = 'fallback'
+        return [best]
+
+    return []
 
 
 def _extract_domain(url):
@@ -265,8 +349,8 @@ def research_firms_batch(crd_list, max_age_days=30, credit_limit=None,
     total = len(crd_list)
     results = {
         'processed': 0, 'cached': 0, 'skipped': 0, 'no_contacts': 0,
-        'errors': 0, 'contacts_found': 0, 'credits_used': 0,
-        'credit_limit_hit': False,
+        'errors': 0, 'contacts_found': 0, 'total_raw_contacts': 0,
+        'credits_used': 0, 'credit_limit_hit': False,
     }
 
     for i, crd in enumerate(crd_list):
@@ -314,16 +398,18 @@ def research_firms_batch(crd_list, max_age_days=30, credit_limit=None,
                 crd=crd, db_path=db_path,
             )
             credits_used += 1
+            results['total_raw_contacts'] += len(contacts)
 
-            # Clear old contacts and insert new ones
+            # Filter to compliance-relevant contacts, then store
+            filtered = _filter_contacts_by_relevance(contacts)
             delete_contacts_for_firm(crd, db_path=db_path)
-            for contact in contacts:
+            for contact in filtered:
                 insert_contact(crd, contact, db_path=db_path)
 
             # Mark firm as processed
             cco = next(
-                (c for c in contacts
-                 if c.get('contact_title') and 'compliance' in c['contact_title'].lower()),
+                (c for c in filtered
+                 if c.get('contact_type') == 'compliance'),
                 None,
             )
             upsert_form_adv(crd, {
@@ -337,7 +423,7 @@ def research_firms_batch(crd_list, max_age_days=30, credit_limit=None,
 
             if contacts:
                 results['processed'] += 1
-                results['contacts_found'] += len(contacts)
+                results['contacts_found'] += len(filtered)
             else:
                 results['no_contacts'] += 1
 
